@@ -182,6 +182,7 @@ impl Overlay {
 pub struct Frame {
     pub mode: Mode,
     pub padding: [f64; 4],
+    pub adaptive_padding: bool,
     pub radius: f64,
     pub outer_radius: f64,
     pub preset: Option<(String, String)>,
@@ -202,6 +203,7 @@ impl Default for Frame {
         Self {
             mode: Mode::Original,
             padding: [72.; 4],
+            adaptive_padding: true,
             radius: 18.,
             outer_radius: 0.,
             preset: None,
@@ -238,19 +240,28 @@ impl Edit {
             frame: Frame::default(),
         }
     }
+    fn frame_scale(&self) -> f64 {
+        if self.frame.adaptive_padding {
+            (self.crop.w.min(self.crop.h) / 600.).clamp(1. / 72., 1.)
+        } else {
+            1.
+        }
+    }
     pub fn geometry(&self) -> (f64, f64, i32, i32) {
         let f = &self.frame;
+        let scale = self.frame_scale();
+        let padding = f.padding.map(|p| (p * scale).round());
         let [l, t, r, b] = match f.mode {
             Mode::Original => [0.; 4],
-            Mode::Shadow if f.shadow > 0. => f.padding.map(|p| {
-                let space = shadow_space(f);
+            Mode::Shadow if f.shadow > 0. => padding.map(|p| {
+                let space = (shadow_space(f) * scale).ceil();
                 if f.canvas_color.is_some() {
                     p + space
                 } else {
                     p.max(space)
                 }
             }),
-            _ => f.padding,
+            _ => padding,
         };
         (
             l,
@@ -369,7 +380,7 @@ pub fn paint(c: &Context, image: &ImageSurface, edit: &Edit, draft: Option<&Mark
     c.save()?;
     clip_outer(c, f, w, h);
     let inset = if f.mode == Mode::Shadow && f.shadow > 0. && f.canvas_color.is_some() {
-        shadow_space(f)
+        (shadow_space(f) * edit.frame_scale()).ceil()
     } else {
         0.
     };
@@ -393,12 +404,13 @@ pub fn paint(c: &Context, image: &ImageSurface, edit: &Edit, draft: Option<&Mark
     if f.mode != Mode::Original && f.shadow > 0. {
         let (r, g, b, a) = f.shadow_color;
         for step in (1..=28).rev() {
-            let d = f.shadow * 1.65 * step as f64 / 28.;
+            let scale = edit.frame_scale();
+            let d = f.shadow * scale * 1.65 * step as f64 / 28.;
             round(
                 c,
                 Rect {
-                    x: shadow_bounds.x + f.shadow_offset.0 - d,
-                    y: shadow_bounds.y + f.shadow_offset.1 - d,
+                    x: shadow_bounds.x + f.shadow_offset.0 * scale - d,
+                    y: shadow_bounds.y + f.shadow_offset.1 * scale - d,
                     w: shadow_bounds.w + 2. * d,
                     h: shadow_bounds.h + 2. * d,
                 },
@@ -631,6 +643,21 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn adaptive_padding_tracks_the_short_edge() {
+        let image = ImageSurface::create(Format::ARgb32, 39, 25).unwrap();
+        let mut edit = Edit::new(&image);
+        edit.frame.mode = Mode::Gradient;
+        assert_eq!(edit.geometry(), (3., 3., 45, 31));
+        edit.crop.w = 1920.;
+        edit.crop.h = 1080.;
+        assert_eq!(edit.geometry(), (72., 72., 2064, 1224));
+        edit.crop.w = 39.;
+        edit.crop.h = 25.;
+        edit.frame.adaptive_padding = false;
+        assert_eq!(edit.geometry(), (72., 72., 183, 169));
+    }
+
+    #[test]
     fn blur_cannot_restore_redacted_pixels() {
         let image = ImageSurface::create(Format::ARgb32, 64, 64).unwrap();
         let cr = Context::new(&image).unwrap();
@@ -672,6 +699,7 @@ mod tests {
                 mode: Mode::Gradient,
                 gradient,
                 padding: [20., 20., 20., 10.],
+                adaptive_padding: false,
                 ..Frame::default()
             };
             let mut output =

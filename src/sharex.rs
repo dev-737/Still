@@ -34,6 +34,7 @@ pub fn read(input: impl Read + Seek) -> Result<(Frame, String)> {
     let mut frame = Frame {
         mode: Mode::Shadow,
         padding: [0.; 4],
+        adaptive_padding: false,
         radius: 0.,
         shadow: 0.,
         ..Frame::default()

@@ -1080,9 +1080,26 @@ impl Ui {
             choose.connect_clicked(move |_| f(()));
             self.frame_controls.append(&choose);
         }
+        if frame.preset.is_none() {
+            let adaptive = gtk::Switch::builder()
+                .active(frame.adaptive_padding)
+                .valign(gtk::Align::Center)
+                .build();
+            adaptive.update_property(&[gtk::accessible::Property::Label("Adaptive padding")]);
+            let change = weak(self, |ui, active| {
+                ui.change_frame(|frame| frame.adaptive_padding = active)
+            });
+            adaptive.connect_active_notify(move |toggle| change(toggle.is_active()));
+            self.frame_controls
+                .append(&row("Adaptive padding", &adaptive));
+        }
         for (label, value, max, update) in [
             (
-                "Padding",
+                if frame.adaptive_padding {
+                    "Max padding"
+                } else {
+                    "Padding"
+                },
                 frame.padding.iter().sum::<f64>() / 4.,
                 512.,
                 (|f: &mut Frame, v| f.padding = [v; 4]) as fn(&mut Frame, f64),
