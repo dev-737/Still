@@ -59,6 +59,7 @@ pub struct Overlay {
     pub right: bool,
     pub bottom: bool,
     pub offset: Point,
+    pub canvas_inset: [f64; 4],
     pub content: OverlayContent,
 }
 #[derive(Clone)]
@@ -67,6 +68,17 @@ pub enum OverlayContent {
         surface: ImageSurface,
         size: Point,
         opacity: f64,
+        flip: (bool, bool),
+        nearest: bool,
+    },
+    Circle {
+        diameter: f64,
+        color: Color,
+        outline: Option<(f64, Color)>,
+    },
+    Border {
+        width: f64,
+        color: Color,
     },
     Text {
         text: String,
@@ -90,6 +102,8 @@ impl Overlay {
                 surface,
                 size: (width, height),
                 opacity,
+                flip,
+                nearest,
             } => {
                 let (x, y) = self.position(w, h, *width, *height);
                 c.save()?;
@@ -100,10 +114,45 @@ impl Overlay {
                     width / f64::from(surface.width()),
                     height / f64::from(surface.height()),
                 );
+                let sw = f64::from(surface.width());
+                let sh = f64::from(surface.height());
+                c.translate(if flip.0 { sw } else { 0. }, if flip.1 { sh } else { 0. });
+                c.scale(if flip.0 { -1. } else { 1. }, if flip.1 { -1. } else { 1. });
                 c.set_source_surface(surface, 0., 0.)?;
-                c.source().set_filter(cairo::Filter::Best);
+                c.source().set_filter(if *nearest {
+                    cairo::Filter::Nearest
+                } else {
+                    cairo::Filter::Best
+                });
                 c.paint_with_alpha(*opacity)?;
                 c.restore()?;
+            }
+            OverlayContent::Circle {
+                diameter,
+                color,
+                outline,
+            } => {
+                let (x, y) = self.position(w, h, *diameter, *diameter);
+                let radius = diameter / 2.;
+                c.new_path();
+                c.arc(x + radius, y + radius, radius, 0., TAU);
+                source(c, *color);
+                if let Some((width, stroke)) = outline {
+                    c.fill_preserve()?;
+                    source(c, *stroke);
+                    c.set_line_width(*width);
+                    c.stroke()?;
+                } else {
+                    c.fill()?;
+                }
+            }
+            OverlayContent::Border { width, color } => {
+                let width = width.min(w / 2.).min(h / 2.);
+                c.new_path();
+                c.rectangle(width / 2., width / 2., w - width, h - width);
+                c.set_line_width(width);
+                source(c, *color);
+                c.stroke()?;
             }
             OverlayContent::Text {
                 text,
@@ -144,6 +193,8 @@ pub struct Frame {
     pub stops: Vec<(f64, Color)>,
     pub background: Option<ImageSurface>,
     pub canvas_color: Option<Color>,
+    pub canvas_radius: Option<f64>,
+    pub canvas_rim: Option<(Color, f64)>,
     pub overlays: Vec<Overlay>,
 }
 impl Default for Frame {
@@ -162,6 +213,8 @@ impl Default for Frame {
             stops: vec![(0., (0.28, 0.87, 0.60, 1.)), (1., (0.25, 0.47, 0.86, 1.))],
             background: None,
             canvas_color: None,
+            canvas_radius: None,
+            canvas_rim: None,
             overlays: vec![],
         }
     }
@@ -190,7 +243,12 @@ impl Edit {
         let [l, t, r, b] = match f.mode {
             Mode::Original => [0.; 4],
             Mode::Shadow if f.shadow > 0. => f.padding.map(|p| {
-                p.max(f.shadow * 2. + f.shadow_offset.0.abs().max(f.shadow_offset.1.abs()))
+                let space = shadow_space(f);
+                if f.canvas_color.is_some() {
+                    p + space
+                } else {
+                    p.max(space)
+                }
             }),
             _ => f.padding,
         };
@@ -203,6 +261,9 @@ impl Edit {
     }
 }
 
+fn shadow_space(f: &Frame) -> f64 {
+    f.shadow * 2. + f.shadow_offset.0.abs().max(f.shadow_offset.1.abs())
+}
 fn source(c: &Context, (r, g, b, a): Color) {
     c.set_source_rgba(r, g, b, a);
 }
@@ -307,12 +368,22 @@ pub fn paint(c: &Context, image: &ImageSurface, edit: &Edit, draft: Option<&Mark
     };
     c.save()?;
     clip_outer(c, f, w, h);
-    if f.mode != Mode::Original {
-        if let Some(color) = f.canvas_color {
-            source(c, color);
-            c.paint()?;
-        }
-    }
+    let inset = if f.mode == Mode::Shadow && f.shadow > 0. && f.canvas_color.is_some() {
+        shadow_space(f)
+    } else {
+        0.
+    };
+    let canvas = Rect {
+        x: inset,
+        y: inset,
+        w: f64::from(w) - 2. * inset,
+        h: f64::from(h) - 2. * inset,
+    };
+    let shadow_bounds = if f.canvas_color.is_some() {
+        canvas
+    } else {
+        bounds
+    };
     background(c, f, w as f64, h as f64)?;
     let radius = if f.mode == Mode::Original {
         0.
@@ -326,14 +397,33 @@ pub fn paint(c: &Context, image: &ImageSurface, edit: &Edit, draft: Option<&Mark
             round(
                 c,
                 Rect {
-                    x: x + f.shadow_offset.0 - d,
-                    y: y + f.shadow_offset.1 - d,
-                    w: bounds.w + 2. * d,
-                    h: bounds.h + 2. * d,
+                    x: shadow_bounds.x + f.shadow_offset.0 - d,
+                    y: shadow_bounds.y + f.shadow_offset.1 - d,
+                    w: shadow_bounds.w + 2. * d,
+                    h: shadow_bounds.h + 2. * d,
                 },
-                radius + d,
+                f.canvas_radius.unwrap_or(radius) + d,
             );
             source(c, (r, g, b, a * (1. - step as f64 / 29.) / 14.));
+            c.fill()?;
+        }
+    }
+    c.save()?;
+    if f.mode != Mode::Original {
+        if let Some(color) = f.canvas_color {
+            round(c, canvas, f.canvas_radius.unwrap_or(0.));
+            c.clip();
+            source(c, f.canvas_rim.map_or(color, |(rim, _)| rim));
+            c.paint()?;
+            let rim = f.canvas_rim.map_or(0., |(_, size)| size);
+            let inner = Rect {
+                x: canvas.x + rim,
+                y: canvas.y + rim,
+                w: (canvas.w - 2. * rim).max(0.),
+                h: (canvas.h - 2. * rim).max(0.),
+            };
+            round(c, inner, f.canvas_radius.unwrap_or(0.));
+            source(c, color);
             c.fill()?;
         }
     }
@@ -362,9 +452,14 @@ pub fn paint(c: &Context, image: &ImageSurface, edit: &Edit, draft: Option<&Mark
     c.restore()?;
     if f.mode != Mode::Original {
         for overlay in &f.overlays {
-            overlay.paint(c, f64::from(w), f64::from(h))?;
+            let [l, t, r, b] = overlay.canvas_inset;
+            c.save()?;
+            c.translate(canvas.x + l, canvas.y + t);
+            overlay.paint(c, canvas.w - l - r, canvas.h - t - b)?;
+            c.restore()?;
         }
     }
+    c.restore()?;
     c.restore()?;
     Ok(())
 }

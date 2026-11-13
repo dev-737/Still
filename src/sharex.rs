@@ -40,7 +40,7 @@ pub fn read(input: impl Read + Seek) -> Result<(Frame, String)> {
     };
     let mut missing = std::collections::BTreeSet::new();
     let mut matched = 0;
-    let mut margins = false;
+    let mut rim = None;
     let mut image_budget = 4_194_304;
     let now = gtk::glib::DateTime::now_local().ok();
     for effect in effects
@@ -59,7 +59,12 @@ pub fn read(input: impl Read + Seek) -> Result<(Frame, String)> {
             .unwrap_or("");
         match kind {
             "RoundedCorners" if effect["CornerRadius"].is_number() => {
-                frame.radius = effect["CornerRadius"].as_f64().unwrap().clamp(0., 512.)
+                let radius = effect["CornerRadius"].as_f64().unwrap().clamp(0., 512.);
+                if frame.canvas_color.is_some() {
+                    frame.canvas_radius = Some(radius);
+                } else {
+                    frame.radius = radius;
+                }
             }
             "Shadow" if effect["Size"].is_number() => {
                 frame.shadow = effect["Size"].as_f64().unwrap().clamp(0., 128.);
@@ -70,16 +75,72 @@ pub fn read(input: impl Read + Seek) -> Result<(Frame, String)> {
                 }
             }
             "Canvas"
-                if !margins
-                    && matches!(effect["MarginMode"].as_str(), None | Some("AbsoluteSize"))
+                if matches!(effect["MarginMode"].as_str(), None | Some("AbsoluteSize"))
                     && (effect["Color"] == "Transparent" || color(&effect["Color"]).is_some()) =>
             {
                 if let Some(p) = numbers::<4>(&effect["Margin"])
                     .filter(|p| p.iter().all(|n| *n >= 0. && *n <= 512.))
                 {
-                    frame.padding = p;
-                    frame.canvas_color = color(&effect["Color"]);
-                    margins = true;
+                    for (margin, added) in frame.padding.iter_mut().zip(p) {
+                        *margin += added;
+                    }
+                    for overlay in &mut frame.overlays {
+                        for (inset, added) in overlay.canvas_inset.iter_mut().zip(p) {
+                            *inset += added;
+                        }
+                    }
+                    if let Some(color) = color(&effect["Color"]) {
+                        frame.canvas_color = Some(color);
+                    }
+                    rim = if p.iter().all(|&edge| edge == p[0]) {
+                        Some(p[0])
+                    } else {
+                        None
+                    };
+                } else {
+                    missing.insert(kind);
+                    continue;
+                }
+            }
+            "DrawBackground"
+                if effect["UseGradient"] == false && color(&effect["Color"]).is_some() =>
+            {
+                let color = color(&effect["Color"]).unwrap();
+                if let Some(size) = rim
+                    .take()
+                    .filter(|&size| size > 0. && frame.canvas_color.is_some())
+                {
+                    frame.canvas_rim = Some((color, size));
+                } else {
+                    frame.canvas_color = Some(color);
+                }
+            }
+            "DrawBorder"
+                if effect["Type"] == "Inside"
+                    && effect["DashStyle"] == "Solid"
+                    && effect["UseGradient"] != true =>
+            {
+                if let (Some(width), Some(color)) =
+                    (effect["Size"].as_f64(), color(&effect["Color"]))
+                {
+                    frame.overlays.push(Overlay {
+                        right: false,
+                        bottom: false,
+                        offset: (0., 0.),
+                        canvas_inset: [0.; 4],
+                        content: OverlayContent::Border {
+                            width: width.clamp(0., 512.),
+                            color,
+                        },
+                    });
+                } else {
+                    missing.insert(kind);
+                    continue;
+                }
+            }
+            "DrawTextEx" => {
+                if let Some(overlay) = circle_glyph(effect) {
+                    frame.overlays.push(overlay);
                 } else {
                     missing.insert(kind);
                     continue;
@@ -172,6 +233,7 @@ fn overlay(effect: &Value, content: OverlayContent) -> Option<Overlay> {
         right,
         bottom,
         offset: (x.clamp(-4096., 4096.), y.clamp(-4096., 4096.)),
+        canvas_inset: [0.; 4],
         content,
     })
 }
@@ -181,12 +243,14 @@ fn image_overlay<R: Read + Seek>(
     budget: &mut u64,
 ) -> Option<Overlay> {
     if effect["Tile"] == true
-        || !matches!(effect["RotateFlip"].as_str(), None | Some("None"))
         || !matches!(
             effect["CompositingMode"].as_str(),
             None | Some("SourceOver")
         )
-        || effect["SizeMode"] != "AbsoluteSize"
+        || !matches!(
+            effect["SizeMode"].as_str(),
+            Some("AbsoluteSize" | "DontResize")
+        )
     {
         return None;
     }
@@ -216,7 +280,18 @@ fn image_overlay<R: Read + Seek>(
     }
     *budget -= pixels;
     let surface = cairo::ImageSurface::create_from_png(&mut std::io::Cursor::new(bytes)).ok()?;
-    let [w, h] = numbers::<2>(&effect["Size"])?;
+    let flip = match effect["RotateFlip"].as_str() {
+        None | Some("None") => (false, false),
+        Some("FlipX") => (true, false),
+        Some("FlipY") => (false, true),
+        Some("Rotate180") => (true, true),
+        _ => return None,
+    };
+    let [w, h] = if effect["SizeMode"] == "DontResize" {
+        [0., 0.]
+    } else {
+        numbers::<2>(&effect["Size"])?
+    };
     if !(0. ..=4096.).contains(&w) || !(0. ..=4096.).contains(&h) {
         return None;
     }
@@ -231,7 +306,43 @@ fn image_overlay<R: Read + Seek>(
         OverlayContent::Image {
             surface,
             size,
+            flip,
+            nearest: effect["InterpolationMode"] == "NearestNeighbor",
             opacity: effect["Opacity"].as_f64().unwrap_or(100.).clamp(0., 100.) / 100.,
+        },
+    )
+}
+fn circle_glyph(effect: &Value) -> Option<Overlay> {
+    if effect["Text"].as_str()? != "\u{e91f}"
+        || effect["Angle"] != 0
+        || effect["UseGradient"] == true
+        || effect["Shadow"] == true
+        || effect["OutlineUseGradient"] == true
+    {
+        return None;
+    }
+    let (family, size) = effect["Font"].as_str()?.split_once(',')?;
+    if family.trim() != "Segoe MDL2 Assets" {
+        return None;
+    }
+    let points = size.trim().strip_suffix("pt")?.parse::<f64>().ok()?;
+    if !(1. ..=128.).contains(&points) {
+        return None;
+    }
+    let outline = if effect["Outline"] == true {
+        Some((
+            effect["OutlineSize"].as_f64()?.clamp(0., 24.),
+            color(&effect["OutlineColor"])?,
+        ))
+    } else {
+        None
+    };
+    overlay(
+        effect,
+        OverlayContent::Circle {
+            diameter: points * 96. / 72.,
+            color: color(&effect["Color"])?,
+            outline,
         },
     )
 }
@@ -285,11 +396,15 @@ fn color(v: &Value) -> Option<Color> {
         "black" => Some((0., 0., 0., 1.)),
         "white" => Some((1., 1., 1., 1.)),
         _ => {
-            let [r, g, b] = numbers::<3>(v)?;
-            if [r, g, b].iter().any(|n| !(0. ..=255.).contains(n)) {
+            let [a, r, g, b] = if let Some([r, g, b]) = numbers::<3>(v) {
+                [255., r, g, b]
+            } else {
+                numbers::<4>(v)?
+            };
+            if [a, r, g, b].iter().any(|n| !(0. ..=255.).contains(n)) {
                 return None;
             }
-            Some((r / 255., g / 255., b / 255., 1.))
+            Some((r / 255., g / 255., b / 255., a / 255.))
         }
     }
 }
