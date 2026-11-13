@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Still
+Comment=Capture and edit screenshots
+Exec=still %f
+Icon=camera-photo
+Categories=Graphics;
+Terminal=false
+Actions=Settings;
+
+[Desktop Action Settings]
+Name=Capture settings
+Exec=still --settings

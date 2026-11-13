@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 460" role="img" aria-labelledby="title description">
+  <title id="title">Still</title>
+  <desc id="description">A screenshot editor for Wayland. A crop selection sits inside a stylized editor window.</desc>
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0H0V24" fill="none" stroke="#25362e" stroke-width="1"/>
+    </pattern>
+    <clipPath id="window">
+      <rect x="768" y="65" width="575" height="330" rx="21"/>
+    </clipPath>
+  </defs>
+  <rect width="1440" height="460" rx="28" fill="#131b17"/>
+  <path d="M709 0v460" stroke="#2b3930"/>
+  <rect x="710" width="730" height="460" rx="28" fill="url(#grid)"/>
+  <g transform="translate(96 91)" fill="none" stroke="#bfe7be" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 0v32h32M0 8h32v32"/>
+  </g>
+  <g font-family="DejaVu Sans, sans-serif">
+    <text x="90" y="256" fill="#f2f6eb" font-size="140" font-weight="700" letter-spacing="-6">Still</text>
+    <text x="98" y="311" fill="#c0cfc1" font-size="29">Screenshot editor for Wayland</text>
+    <path d="M98 352h67" stroke="#bfe7be" stroke-width="3"/>
+  </g>
+  <rect x="779" y="81" width="575" height="330" rx="21" fill="#0b100d" opacity=".55"/>
+  <g clip-path="url(#window)">
+    <rect x="768" y="65" width="575" height="330" fill="#202c25"/>
+    <rect x="768" y="65" width="575" height="46" fill="#2a372e"/>
+    <path d="M768 111h575M825 111v284M1240 111v284" stroke="#425247"/>
+    <g fill="#819184">
+      <circle cx="794" cy="88" r="4"/><circle cx="811" cy="88" r="4"/><circle cx="828" cy="88" r="4"/>
+    </g>
+    <rect x="1260" y="79" width="62" height="18" rx="5" fill="#bfe7be"/>
+    <rect x="778" y="124" width="36" height="36" rx="8" fill="#bfe7be"/>
+    <g fill="none" stroke="#a7b9a8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M789 136h14v14m-11-17v14h14" stroke="#213329"/>
+      <path d="m788 191 15-15m-8 0h8v8"/>
+      <rect x="787" y="212" width="18" height="13" rx="2"/>
+      <circle cx="796" cy="256" r="8"/>
+      <path d="M788 292h16m-8 0v16m-4 0h8"/>
+    </g>
+    <rect x="858" y="143" width="351" height="220" rx="12" fill="#344b3e"/>
+    <rect x="880" y="164" width="307" height="177" rx="8" fill="#719987"/>
+    <circle cx="1117" cy="207" r="19" fill="#e0e6b2"/>
+    <path d="m880 294 75-76 44 45 43-33 145 88v23H880z" fill="#4f7463"/>
+    <path d="m880 324 90-42 55 31 58-33 104 44v17H880z" fill="#2d5144"/>
+    <rect x="906" y="181" width="251" height="143" rx="3" fill="none" stroke="#edf7dc" stroke-width="1.5" stroke-dasharray="5 6"/>
+    <g fill="#edf7dc">
+      <rect x="902" y="177" width="8" height="8" rx="1"/><rect x="1153" y="177" width="8" height="8" rx="1"/>
+      <rect x="902" y="320" width="8" height="8" rx="1"/><rect x="1153" y="320" width="8" height="8" rx="1"/>
+    </g>
+    <g fill="#546a5b">
+      <rect x="1256" y="139" width="70" height="32" rx="6"/>
+      <rect x="1256" y="181" width="70" height="32" rx="6"/>
+      <rect x="1256" y="242" width="70" height="3" rx="1"/>
+      <rect x="1256" y="272" width="70" height="3" rx="1"/>
+      <rect x="1256" y="302" width="70" height="3" rx="1"/>
+    </g>
+    <rect x="1256" y="181" width="70" height="32" rx="6" fill="#7dab91" stroke="#d3edc8"/>
+    <rect x="1275" y="149" width="32" height="12" rx="2" fill="#bbcfc0"/>
+    <rect x="1275" y="191" width="32" height="12" rx="2" fill="#e3f0d5"/>
+    <g fill="#bfe7be">
+      <circle cx="1281" cy="243.5" r="5"/><circle cx="1307" cy="273.5" r="5"/><circle cx="1293" cy="303.5" r="5"/>
+    </g>
+  </g>
+  <rect x="768" y="65" width="575" height="330" rx="21" fill="none" stroke="#597361"/>
+</svg>

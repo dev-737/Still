@@ -1,0 +1,77 @@
+name: Release Linux packages
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Check release version
+        id: version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          manifest_version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          test "$version" = "$manifest_version"
+          echo "number=$version" >> "$GITHUB_OUTPUT"
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libcairo2-dev libpango1.0-dev libgraphene-1.0-dev rpm desktop-file-utils
+          rustup update stable
+      - name: Build
+        run: cargo +stable build --release --locked
+      - name: Package and inspect downloads
+        env:
+          STILL_VERSION: ${{ steps.version.outputs.number }}
+        run: |
+          target/release/still --help
+          desktop-file-validate packaging/still.desktop
+          bash packaging/package-linux.sh target/release/still "$STILL_VERSION" dist
+          tar -tzf dist/*.tar.gz
+          dpkg-deb --info dist/*.deb
+          rpm -qpl dist/*.rpm
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: packages
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: linux-*
+          merge-multiple: true
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          shopt -s nullglob
+          tarballs=(*.tar.gz)
+          debs=(*.deb)
+          rpms=(*.rpm)
+          test "${#tarballs[@]}" = 2
+          test "${#debs[@]}" = 2
+          test "${#rpms[@]}" = 2
+          sha256sum "${tarballs[@]}" "${debs[@]}" "${rpms[@]}" > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Still $GITHUB_REF_NAME" --generate-notes "${tarballs[@]}" "${debs[@]}" "${rpms[@]}" SHA256SUMS
