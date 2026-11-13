@@ -124,10 +124,49 @@ fn weak<T>(ui: &Rc<Ui>, f: impl Fn(&Rc<Ui>, T) + 'static) -> impl Fn(T) + 'stati
         }
     }
 }
+thread_local! {
+    static SCALE: Cell<f64> = const { Cell::new(1.) };
+}
+
+fn scale() -> f64 {
+    SCALE.with(Cell::get)
+}
+
+fn scaled(v: i32) -> i32 {
+    (f64::from(v) * scale()).round() as i32
+}
+
+fn scaled_css(css: &str, factor: f64) -> String {
+    let mut out = String::with_capacity(css.len());
+    let bytes = css.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit()
+            && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'#')
+        {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                i += 1;
+            }
+            if css[i..].starts_with("px") {
+                let v: f64 = css[start..i].parse().unwrap_or(0.);
+                out.push_str(&format!("{:.2}", v * factor));
+            } else {
+                out.push_str(&css[start..i]);
+            }
+        } else {
+            let ch = css[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
 fn icon(kind: &str) -> gtk::DrawingArea {
     let icon = gtk::DrawingArea::new();
-    icon.set_content_width(20);
-    icon.set_content_height(20);
+    icon.set_content_width(scaled(20));
+    icon.set_content_height(scaled(20));
     let kind = kind.to_owned();
     icon.set_draw_func(move |widget, c, w, h| {
         let color = widget.color();
@@ -203,8 +242,17 @@ pub fn launch(bytes: Option<Vec<u8>>, path: Option<PathBuf>, preferences: bool) 
             window.present();
             return;
         }
+        let factor = Settings::load().map_or(1., |s| s.ui_scale).clamp(0.5, 2.);
+        SCALE.with(|c| c.set(factor));
+        if (factor - 1.).abs() > 1e-3 {
+            if let Some(settings) = gtk::Settings::default() {
+                let dpi = settings.gtk_xft_dpi();
+                let base = if dpi > 0 { dpi } else { 96 * 1024 };
+                settings.set_gtk_xft_dpi((f64::from(base) * factor).round() as i32);
+            }
+        }
         let provider = gtk::CssProvider::new();
-        provider.load_from_string(include_str!("style.css"));
+        provider.load_from_string(&scaled_css(include_str!("style.css"), factor));
         if let Some(display) = gdk::Display::default() {
             gtk::style_context_add_provider_for_display(
                 &display,
@@ -246,8 +294,8 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Still")
-        .default_width(1110)
-        .default_height(730)
+        .default_width(scaled(1110))
+        .default_height(scaled(730))
         .build();
     let toast = adw::ToastOverlay::new();
     let view = adw::ToolbarView::new();
@@ -281,9 +329,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     view.add_top_bar(&header);
     let middle = hbox(0);
     middle.set_vexpand(true);
-    let rail = vbox(6);
+    let rail = vbox(2);
     rail.add_css_class("tool-rail");
-    margin(&rail, 8);
+    margin(&rail, 6);
     let mut buttons = vec![];
     for (i, (tool, label, key, shape)) in TOOLS.iter().enumerate() {
         if i == 1 || i == 7 {
@@ -314,7 +362,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     }
     let rail_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .min_content_width(61)
+        .min_content_width(scaled(61))
         .child(&rail)
         .build();
     middle.append(&rail_scroll);
@@ -360,7 +408,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .build();
     body.add_named(&scroll, Some("image"));
     center.append(&body);
-    center.set_width_request(260);
+    center.set_width_request(scaled(260));
     let framing = vbox(12);
     margin(&framing, 13);
     framing.add_css_class("framing");
@@ -440,7 +488,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     framing.append(&frame_controls);
     let inspector = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .min_content_width(218)
+        .min_content_width(scaled(218))
         .propagate_natural_width(false)
         .child(&framing)
         .build();
@@ -2191,8 +2239,8 @@ fn settings(parent: &adw::ApplicationWindow) {
         .title("Still Settings")
         .transient_for(parent)
         .modal(true)
-        .default_width(545)
-        .default_height(620)
+        .default_width(scaled(545))
+        .default_height(scaled(660))
         .build();
     let page = adw::PreferencesPage::builder()
         .title("Capture")
@@ -2245,6 +2293,21 @@ fn settings(parent: &adw::ApplicationWindow) {
     files.add(&folder);
     files.add(&filename);
     page.add(&files);
+    let look = adw::PreferencesGroup::builder().title("Appearance").build();
+    let zoom = adw::SpinRow::builder()
+        .title("Interface scale")
+        .subtitle("Percent. Takes effect the next time Still opens.")
+        .adjustment(&gtk::Adjustment::new(
+            (current.ui_scale * 100.).round(),
+            50.,
+            200.,
+            5.,
+            25.,
+            0.,
+        ))
+        .build();
+    look.add(&zoom);
+    page.add(&look);
     let apply_group = adw::PreferencesGroup::new();
     let line = adw::ActionRow::builder()
         .title("Apply capture settings")
@@ -2264,6 +2327,7 @@ fn settings(parent: &adw::ApplicationWindow) {
             preview: preview.is_active(),
             folder: PathBuf::from(folder.text().as_str()),
             filename: filename.text().to_string(),
+            ui_scale: zoom.value() / 100.,
         };
         match data.store() {
             Ok(()) => {
@@ -2284,6 +2348,16 @@ mod tests {
 
     fn edit(w: i32, h: i32) -> Edit {
         Edit::new(&ImageSurface::create(Format::ARgb32, w, h).unwrap())
+    }
+
+    #[test]
+    fn css_pixel_sizes_follow_the_interface_scale() {
+        let css = scaled_css(
+            ".a { min-width: 34px; color: #4bd996; margin: 0 .5em; opacity: .15; }",
+            1.5,
+        );
+        assert!(css.contains("min-width: 51.00px"));
+        assert!(css.contains("#4bd996") && css.contains(".5em") && css.contains(".15"));
     }
 
     #[test]

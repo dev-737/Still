@@ -17,6 +17,7 @@ pub struct Settings {
     pub preview: bool,
     pub folder: PathBuf,
     pub filename: String,
+    pub ui_scale: f64,
 }
 
 fn home() -> PathBuf {
@@ -34,6 +35,7 @@ impl Default for Settings {
             preview: true,
             folder: home().join("Pictures/Screenshots"),
             filename: "Still-%Y-%m-%d_%H-%M-%S".into(),
+            ui_scale: 1.,
         }
     }
 }
@@ -55,6 +57,9 @@ impl Settings {
         }
     }
     pub fn store(&self) -> Result<()> {
+        if !(0.5..=2.).contains(&self.ui_scale) {
+            return Err("Interface scale must be between 50% and 200%.".into());
+        }
         if self.save {
             if !self.folder.is_absolute() {
                 return Err("Use an absolute save folder.".into());

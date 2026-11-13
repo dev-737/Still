@@ -1,5 +1,5 @@
-.tool-rail { padding: 3px 0; }
-.rail-button { min-width: 34px; min-height: 36px; padding: 2px; }
+.tool-rail { padding: 2px 0; }
+.rail-button { min-width: 32px; min-height: 32px; padding: 1px; }
 .rail-button.active-tool { background: alpha(@accent_bg_color, 0.23); color: @accent_color; }
 .canvas { background: @view_bg_color; }
 .tool-options { padding: 2px 8px; }
