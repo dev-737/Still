@@ -11,7 +11,7 @@ apt-get install -y -qq --no-install-recommends \
   build-essential curl ca-certificates pkg-config file patchelf desktop-file-utils \
   libgtk-4-dev libadwaita-1-dev libcairo2-dev libpango1.0-dev libgraphene-1.0-dev \
   libglib2.0-bin librsvg2-common shared-mime-info adwaita-icon-theme hicolor-icon-theme \
-  grim slurp wl-clipboard libnotify-bin
+  grim slurp wl-clipboard libnotify-bin dconf-gsettings-backend
 
 if ! command -v cargo >/dev/null; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -38,10 +38,17 @@ linuxdeploy-x86_64.AppImage --appdir AppDir \
   --executable /usr/bin/slurp \
   --executable /usr/bin/wl-copy \
   --executable /usr/bin/notify-send \
+  --library /usr/lib/x86_64-linux-gnu/libdconf.so.1 \
   --desktop-file packaging/still.desktop \
   --icon-file packaging/icons/hicolor/scalable/apps/still.svg \
   --custom-apprun packaging/appimage/AppRun \
   --plugin gtk
 
 sed -i '/GDK_BACKEND/d' AppDir/apprun-hooks/*.sh
+mkdir -p AppDir/usr/lib/gio/modules
+cp /usr/lib/x86_64-linux-gnu/gio/modules/libdconfsettings.so AppDir/usr/lib/gio/modules/
+patchelf --set-rpath '$ORIGIN/../..' AppDir/usr/lib/gio/modules/libdconfsettings.so
+cat > AppDir/apprun-hooks/dconf.sh <<'HOOK'
+export GIO_EXTRA_MODULES="$APPDIR/usr/lib/gio/modules${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
+HOOK
 chown -R "$HOST_UID:$HOST_GID" AppDir 2>/dev/null || true

@@ -1,5 +1,6 @@
 #!/bin/sh
 HERE=$(dirname "$(readlink -f "$0")")
+export APPDIR="${APPDIR:-$HERE}"
 export PATH="$PATH:$HERE/usr/bin"
 for hook in "$HERE"/apprun-hooks/*.sh; do
   [ -r "$hook" ] && . "$hook"
