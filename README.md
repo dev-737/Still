@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/banner.webp" alt="Still, a screenshot editor for Wayland" width="100%">
+  <img src="docs/images/banner.svg" alt="Still, a screenshot editor for Wayland" width="100%">
 </p>
 
 # Still
@@ -24,6 +24,20 @@ ShareX import supports canvas padding and color, rounded corners, shadows, suppo
 Choose any combination of **Copy to clipboard**, **Save to folder**, **Open editor**, and **Show clickable preview** in Settings. The initial setup copies and shows a notification preview. Your notification daemon handles its placement.
 
 Select a style in **Framing** and click **Make default** to use it for new images, automatic copy and save, and capture previews. Select **Original** and make it the default to keep captures unframed.
+
+## Linux downloads
+
+Tagged builds publish x86-64 and ARM64 downloads on the [Releases page](https://github.com/dev-737/Still/releases).
+
+| Format | Use |
+| --- | --- |
+| `.tar.gz` | Extract and run `./bin/still` with the runtime dependencies installed. |
+| `.deb` | Install with `sudo apt install ./still_VERSION_ARCH.deb` on Ubuntu 24.04 or compatible newer distributions. |
+| `.rpm` | Install with `sudo dnf install ./still-VERSION-1.ARCH.rpm` on compatible Fedora systems. |
+
+The binaries target glibc 2.39 or newer and require GTK 4.12 or newer and libadwaita 1.4 or newer. Each release includes SHA-256 checksums.
+
+To publish a release, commit the version in `Cargo.toml` and `Cargo.lock`, then push a matching tag such as `v0.1.0`. The workflow publishes after both architecture builds pass.
 
 ## Build and run
 
