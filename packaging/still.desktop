@@ -3,9 +3,10 @@ Type=Application
 Name=Still
 Comment=Capture and edit screenshots
 Exec=still %f
-Icon=camera-photo
+Icon=still
 Categories=Graphics;
 Terminal=false
+StartupWMClass=io.github.still.Editor
 Actions=Settings;
 
 [Desktop Action Settings]

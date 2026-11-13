@@ -24,6 +24,8 @@ name="still-$version-linux-$arch"
 stage="$root/$name"
 install -Dm755 "$binary" "$stage/bin/still"
 install -Dm644 packaging/still.desktop "$stage/share/applications/still.desktop"
+install -Dm644 packaging/icons/hicolor/scalable/apps/still.svg "$stage/share/icons/hicolor/scalable/apps/still.svg"
+install -Dm644 packaging/icons/hicolor/symbolic/apps/still-symbolic.svg "$stage/share/icons/hicolor/symbolic/apps/still-symbolic.svg"
 install -Dm644 packaging/Linux.md "$stage/share/doc/still/Linux.md"
 tar -C "$root" -czf "$output/$name.tar.gz" "$name"
 
@@ -63,6 +65,8 @@ cp -a "$stage/." "%{buildroot}%{_prefix}/"
 %files
 %{_bindir}/still
 %{_datadir}/applications/still.desktop
+%{_datadir}/icons/hicolor/scalable/apps/still.svg
+%{_datadir}/icons/hicolor/symbolic/apps/still-symbolic.svg
 %{_datadir}/doc/still/Linux.md
 SPEC
 rpmbuild -bb --define "_topdir $root/rpm" --define "debug_package %{nil}" "$root/still.spec"
