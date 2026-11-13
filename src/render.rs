@@ -451,18 +451,24 @@ pub fn paint(c: &Context, image: &ImageSurface, edit: &Edit, draft: Option<&Mark
         }
     }
     c.save()?;
-    round(c, bounds, radius);
-    c.clip();
     c.translate(x - edit.crop.x, y - edit.crop.y);
-    c.set_source_surface(image, 0., 0.)?;
-    c.paint()?;
+    let pixels = edit.crop;
+    within_image(c, pixels, radius, |c| {
+        c.set_source_surface(image, 0., 0.)?;
+        c.paint()?;
+        Ok(())
+    })?;
     for mark in edit
         .marks
         .iter()
         .chain(draft)
         .filter(|mark| mark.tool != Tool::Redact)
     {
-        draw(c, image, mark)?;
+        if is_free(mark.tool) {
+            draw(c, image, mark)?;
+        } else {
+            within_image(c, pixels, radius, |c| draw(c, image, mark))?;
+        }
     }
     for mark in edit
         .marks
@@ -470,7 +476,7 @@ pub fn paint(c: &Context, image: &ImageSurface, edit: &Edit, draft: Option<&Mark
         .chain(draft)
         .filter(|mark| mark.tool == Tool::Redact)
     {
-        draw(c, image, mark)?;
+        within_image(c, pixels, radius, |c| draw(c, image, mark))?;
     }
     c.restore()?;
     if f.mode != Mode::Original {
@@ -512,26 +518,37 @@ pub fn paint_draft(c: &Context, image: &ImageSurface, edit: &Edit, draft: &Mark)
     };
     c.save()?;
     clip_outer(c, &edit.frame, w, h);
-    round(
-        c,
-        Rect {
-            x,
-            y,
-            w: edit.crop.w,
-            h: edit.crop.h,
-        },
-        radius,
-    );
-    c.clip();
     c.translate(x - edit.crop.x, y - edit.crop.y);
-    draw(c, image, draft)?;
+    if is_free(draft.tool) {
+        draw(c, image, draft)?;
+    } else {
+        within_image(c, edit.crop, radius, |c| draw(c, image, draft))?;
+    }
     if draft.tool != Tool::Redact {
         for mark in edit.marks.iter().filter(|mark| mark.tool == Tool::Redact) {
-            draw(c, image, mark)?;
+            within_image(c, edit.crop, radius, |c| draw(c, image, mark))?;
         }
     }
     c.restore()?;
     Ok(())
+}
+
+pub fn is_free(tool: Tool) -> bool {
+    !matches!(tool, Tool::Crop | Tool::Blur | Tool::Redact)
+}
+
+fn within_image(
+    c: &Context,
+    pixels: Rect,
+    radius: f64,
+    f: impl FnOnce(&Context) -> Result<()>,
+) -> Result<()> {
+    c.save()?;
+    round(c, pixels, radius);
+    c.clip();
+    let result = f(c);
+    c.restore()?;
+    result
 }
 
 fn draw(c: &Context, image: &ImageSurface, m: &Mark) -> Result<()> {
@@ -718,6 +735,34 @@ mod tests {
         assert_eq!(edit.geometry(), (10., 40., 120, 100));
         edit.frame.extra_space = 8.;
         assert_eq!(edit.geometry(), (18., 48., 136, 116));
+    }
+
+    #[test]
+    fn free_marks_draw_over_the_frame_but_blur_stays_inside() {
+        let image = ImageSurface::create(Format::ARgb32, 20, 20).unwrap();
+        let mut edit = Edit::new(&image);
+        edit.frame.mode = Mode::Gradient;
+        edit.frame.adaptive_padding = false;
+        edit.frame.padding = [10.; 4];
+        edit.marks.push(Mark {
+            tool: Tool::Rectangle,
+            points: vec![(-8., -8.), (28., 28.)],
+            color: (1., 0., 0., 1.),
+            width: 2.,
+            text: String::new(),
+        });
+        let mut output =
+            ImageSurface::create_from_png(&mut Cursor::new(png(&image, &edit).unwrap())).unwrap();
+        let stride = output.stride() as usize;
+        let data = output.data().unwrap();
+        let at = |x: usize, y: usize| {
+            u32::from_ne_bytes(
+                data[y * stride + x * 4..y * stride + x * 4 + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(at(2, 20) & 0xffffff, 0xff0000);
     }
 
     #[test]

@@ -1808,13 +1808,25 @@ fn clamp_pan(pan: Point, view: Point, image: Point) -> Point {
     };
     (limit(pan.0, view.0, image.0), limit(pan.1, view.1, image.1))
 }
-fn point(ui: &Ui, edit: &Edit, (x, y): Point) -> Point {
+fn point(ui: &Ui, edit: &Edit, tool: Tool, (x, y): Point) -> Point {
     let (ox, oy, scale) = ui.view(edit);
-    let (left, top, _, _) = edit.geometry();
+    let (left, top, width, height) = edit.geometry();
     let r = edit.crop;
+    let (before, after) = if render::is_free(tool) {
+        (
+            (left, top),
+            (f64::from(width) - left - r.w, f64::from(height) - top - r.h),
+        )
+    } else {
+        ((0., 0.), (0., 0.))
+    };
     (
-        r.x + ((x - ox) / scale - left).round().clamp(0., r.w),
-        r.y + ((y - oy) / scale - top).round().clamp(0., r.h),
+        r.x + ((x - ox) / scale - left)
+            .round()
+            .clamp(-before.0, r.w + after.0),
+        r.y + ((y - oy) / scale - top)
+            .round()
+            .clamp(-before.1, r.h + after.1),
     )
 }
 impl Ui {
@@ -1947,7 +1959,7 @@ fn wire_canvas(ui: &Rc<Ui>) {
             return;
         }
         if let Some(doc) = ui.doc.borrow_mut().as_mut() {
-            let p = point(ui, &doc.edit, (x, y));
+            let p = point(ui, &doc.edit, ui.tool.get(), (x, y));
             doc.draft = Some(Mark {
                 tool: ui.tool.get(),
                 points: vec![p],
@@ -1966,7 +1978,7 @@ fn wire_canvas(ui: &Rc<Ui>) {
         }
         if let Some(doc) = ui.doc.borrow_mut().as_mut() {
             let start = ui.start.get();
-            let mut p = point(ui, &doc.edit, (start.0 + x, start.1 + y));
+            let mut p = point(ui, &doc.edit, ui.tool.get(), (start.0 + x, start.1 + y));
             if let Some(mark) = doc.draft.as_mut() {
                 let a = mark.points[0];
                 if shift {
@@ -2107,7 +2119,7 @@ fn wire_canvas(ui: &Rc<Ui>) {
             return;
         }
         if let Some(doc) = ui.doc.borrow_mut().as_mut() {
-            let p = point(ui, &doc.edit, (x, y));
+            let p = point(ui, &doc.edit, Tool::Text, (x, y));
             doc.checkpoint();
             doc.edit.marks.push(Mark {
                 tool: Tool::Text,
