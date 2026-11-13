@@ -6,6 +6,23 @@
 
 Capture a region, paste it straight away, or click its preview to open the editor. Still is a native Linux app built with Rust, GTK4, and libadwaita. It keeps your screenshot at its captured resolution through editing and PNG export.
 
+## ShareX frames
+
+Import a ShareX image effect preset and Still applies it to your screenshots. The same capture is shown below, unframed and through three `.sxie` packages.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/sharex-Original.webp" alt="Unframed capture" width="420"><br><sub>Original</sub></td>
+    <td align="center"><img src="docs/images/sharex-BackgroundGradient.webp" alt="Capture with the ShareX Background Gradient preset" width="420"><br><sub>Background Gradient</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/sharex-macOSBigSur.webp" alt="Capture with the ShareX macOS Big Sur preset" width="420"><br><sub>macOS Big Sur</sub></td>
+    <td align="center"><img src="docs/images/sharex-Windows11Taskbar.webp" alt="Capture with the ShareX Windows 11 Taskbar preset" width="420"><br><sub>Windows 11 Taskbar</sub></td>
+  </tr>
+</table>
+
+Open a `.sxie` package under **Framing → Import ShareX preset…**. Still keeps a local copy and shows it under **Custom frames**.
+
 ## Editor
 
 <img src="docs/images/editor.webp" alt="Still in dark mode, showing a screenshot on a gradient frame with arrow, rectangle, and text annotations, plus the framing and gradient controls" width="850">
