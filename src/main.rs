@@ -11,11 +11,18 @@ fn run() -> capture::Result<()> {
     match args.next().as_deref().and_then(|s| s.to_str()) {
         Some("--help" | "-h") => {
             println!(
-                "Still - screenshot editor\n\nstill [IMAGE]\nstill --capture\nstill --settings"
+                "Still - screenshot editor\n\nstill [IMAGE]\nstill --capture\nstill --last\nstill --settings"
             );
             return Ok(());
         }
         Some("--settings") => preferences = true,
+        Some("--last") => {
+            let path = capture::last_capture_path();
+            if !path.exists() {
+                return Err("No capture to reopen yet. Take one with still --capture.".into());
+            }
+            return ui::launch(None, Some(path), false);
+        }
         Some("--capture") => {
             let (capture, errors) = capture::run_actions()?;
             for error in errors {

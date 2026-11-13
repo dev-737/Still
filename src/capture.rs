@@ -107,6 +107,24 @@ impl Settings {
     }
 }
 
+pub fn cache_dir() -> PathBuf {
+    env::var_os("XDG_CACHE_HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".cache"))
+        .join("still")
+}
+
+pub fn last_capture_path() -> PathBuf {
+    cache_dir().join("last.png")
+}
+
+fn remember(png: &[u8]) -> Result<()> {
+    let path = last_capture_path();
+    fs::create_dir_all(path.parent().unwrap())?;
+    png_to(&path, png)
+}
+
 pub fn run_actions() -> Result<(Option<Vec<u8>>, Vec<String>)> {
     let settings = Settings::load()?;
     if !settings.copy && !settings.save && !settings.editor && !settings.preview {
@@ -126,6 +144,9 @@ pub fn run_actions() -> Result<(Option<Vec<u8>>, Vec<String>)> {
         }
     };
     let output = rendered.as_deref().unwrap_or(&raw);
+    if let Err(error) = remember(&raw) {
+        errors.push(format!("Could not remember this capture: {error}"));
+    }
     if settings.copy {
         if let Err(error) = copy(output) {
             errors.push(format!("Clipboard: {error}"));
@@ -205,7 +226,7 @@ pub fn preview(png: &[u8]) -> Result<bool> {
             "notify-send",
             "--app-name=Still",
             "--transient",
-            "--expire-time=7000",
+            "--expire-time=10000",
             "--action=default=Open in Still",
             "--action=edit=Open editor",
         ])
@@ -213,7 +234,10 @@ pub fn preview(png: &[u8]) -> Result<bool> {
             "--hint=string:image-path:{}",
             file.path().display()
         ))
-        .args(["Screenshot captured", "Click to edit this capture"])
+        .args([
+            "Screenshot captured",
+            "Click to edit, or run still --last later",
+        ])
         .output()?;
     if output.status.code() == Some(124) {
         return Ok(false);
