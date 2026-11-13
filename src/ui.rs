@@ -67,11 +67,19 @@ struct Ui {
     tool: Cell<Tool>,
     buttons: Vec<(Tool, gtk::Button)>,
     status: gtk::Label,
-    color: gtk::ColorDialogButton,
+    color: ColorPick,
+    stash_color: Cell<[f32; 4]>,
     width: gtk::SpinButton,
     text: gtk::Entry,
     doc: RefCell<Option<Document>>,
-    actual: Cell<bool>,
+    zoom: Cell<f64>,
+    pan: Cell<Point>,
+    pan_base: Cell<Option<Point>>,
+    pointer: Cell<Point>,
+    space: Cell<bool>,
+    zoom_label: gtk::Label,
+    gradient_open: Cell<bool>,
+    export_scale: gtk::DropDown,
     start: Cell<Point>,
     frame_editing: Cell<bool>,
     preview_cache: RefCell<Option<(i32, i32, ImageSurface)>>,
@@ -290,7 +298,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
             Tool::Ellipse => "Drag to draw. Hold Shift for a circle.",
             Tool::Text => "Type a label, then click to place it.",
             Tool::Blur => "Drag over the area to soften.",
-            Tool::Redact => "Drag to cover an area with an opaque block.",
+            Tool::Redact => {
+                "Drag to cover an area with an opaque block. Pick its color on the left."
+            }
         };
         let b = gtk::Button::builder()
             .child(&icon(shape))
@@ -313,11 +323,12 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let options = hbox(8);
     options.add_css_class("tool-options");
     margin(&options, 8);
-    let color =
-        gtk::ColorDialogButton::new(Some(gtk::ColorDialog::builder().with_alpha(false).build()));
-    color.set_rgba(&gdk::RGBA::new(1., 0.36, 0.19, 1.));
-    color.set_tooltip_text(Some("Annotation color"));
-    options.append(&color);
+    let color = ColorPick::new(
+        gdk::RGBA::new(1., 0.36, 0.19, 1.),
+        "Annotation color",
+        |_| {},
+    );
+    options.append(&color.button);
     let width = gtk::SpinButton::with_range(1., 160., 1.);
     width.set_value(6.);
     width.set_tooltip_text(Some("Size in source pixels"));
@@ -353,7 +364,25 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let framing = vbox(12);
     margin(&framing, 13);
     framing.add_css_class("framing");
-    framing.append(&heading("Framing"));
+    let default_button = button("Make default", "win.frame-default");
+    default_button.add_css_class("default-chip");
+    let sharex_menu = gio::Menu::new();
+    sharex_menu.append(Some("Import ShareX preset…"), Some("win.sharex"));
+    sharex_menu.append(Some("Try ShareX sample"), Some("win.sample"));
+    let more = gtk::MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .tooltip_text("ShareX presets")
+        .menu_model(&sharex_menu)
+        .build();
+    more.add_css_class("flat");
+    more.update_property(&[gtk::accessible::Property::Label("ShareX presets")]);
+    let title_row = hbox(6);
+    let title = heading("Framing");
+    title.set_hexpand(true);
+    title_row.append(&title);
+    title_row.append(&default_button);
+    title_row.append(&more);
+    framing.append(&title_row);
     let modes = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .min_children_per_line(2)
@@ -363,11 +392,11 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .homogeneous(true)
         .build();
     let mut frame_buttons = vec![];
-    for (name, mode) in [
-        ("Original", Mode::Original),
-        ("Window shadow", Mode::Shadow),
-        ("Gradient", Mode::Gradient),
-        ("Image", Mode::Image),
+    for (title, name, mode) in [
+        ("Original", "Original", Mode::Original),
+        ("Shadow", "Window shadow", Mode::Shadow),
+        ("Gradient", "Gradient", Mode::Gradient),
+        ("Image", "Image", Mode::Image),
     ] {
         let tile = vbox(5);
         let swatch = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -391,7 +420,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         sample.set_halign(gtk::Align::Center);
         swatch.append(&sample);
         tile.append(&swatch);
-        let label = gtk::Label::new(Some(name));
+        let label = gtk::Label::new(Some(title));
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         tile.append(&label);
         let b = gtk::Button::builder()
@@ -407,14 +436,8 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     framing.append(&modes);
     let saved_frames = vbox(7);
     framing.append(&saved_frames);
-    let default_button = button("Make default", "win.frame-default");
-    default_button.set_tooltip_text(Some("Use this frame when opening new screenshots"));
-    framing.append(&default_button);
-    let frame_controls = vbox(9);
+    let frame_controls = vbox(12);
     framing.append(&frame_controls);
-    framing.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    framing.append(&button("Import ShareX preset…", "win.sharex"));
-    framing.append(&button("Try ShareX sample", "win.sample"));
     let inspector = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .min_content_width(218)
@@ -437,7 +460,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         if pane.width() <= 1 {
             return glib::ControlFlow::Continue;
         }
-        pane.set_position((pane.width() - 258).max(260));
+        pane.set_position((pane.width() - 292).max(260));
         glib::ControlFlow::Break
     });
     middle.append(&split);
@@ -462,6 +485,19 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     status.set_hexpand(true);
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     footer.append(&status);
+    let export_scale = gtk::DropDown::from_strings(&["1×", "2×", "4×"]);
+    export_scale.update_property(&[gtk::accessible::Property::Label("PNG export scale")]);
+    export_scale.set_tooltip_text(Some(
+        "Scale for Copy and Save PNG. Annotations are drawn at export resolution.",
+    ));
+    footer.append(&row("Export", &export_scale));
+    let zoom_label = gtk::Label::new(Some("Fit"));
+    zoom_label.add_css_class("dim-label");
+    zoom_label.set_width_chars(5);
+    zoom_label.set_tooltip_text(Some(
+        "Ctrl+scroll or pinch to zoom, scroll or middle-drag to pan",
+    ));
+    footer.append(&zoom_label);
     footer.append(&button("Fit", "win.fit"));
     footer.append(&button("100%", "win.actual"));
     view.set_content(Some(&middle));
@@ -484,10 +520,18 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         buttons,
         status,
         color,
+        stash_color: Cell::new([0.05, 0.05, 0.05, 1.]),
         width,
         text,
         doc: RefCell::new(None),
-        actual: Cell::new(false),
+        zoom: Cell::new(1.),
+        pan: Cell::new((0., 0.)),
+        pan_base: Cell::new(None),
+        pointer: Cell::new((0., 0.)),
+        space: Cell::new(false),
+        zoom_label,
+        gradient_open: Cell::new(true),
+        export_scale,
         start: Cell::new((0., 0.)),
         frame_editing: Cell::new(false),
         preview_cache: RefCell::new(None),
@@ -528,6 +572,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     }
     ui.rebuild_saved_frames();
     action(&ui, app, "frame-default", &[], |ui| ui.save_default());
+    let refresh_export = weak(&ui, |ui, ()| ui.refresh());
+    ui.export_scale
+        .connect_selected_notify(move |_| refresh_export(()));
     wire_canvas(&ui);
     action(&ui, app, "open", &["<Primary>o"], |ui| ui.open(false));
     action(&ui, app, "capture", &["<Primary><Shift>s"], Ui::capture);
@@ -544,13 +591,13 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         &["<Primary><Shift>z", "<Primary>y"],
         |ui| ui.history(true),
     );
-    action(&ui, app, "fit", &["0"], |ui| {
-        ui.actual.set(false);
-        ui.refresh();
+    action(&ui, app, "fit", &["0"], |ui| ui.reset_view());
+    action(&ui, app, "actual", &["1"], |ui| ui.actual_size());
+    action(&ui, app, "zoom-in", &["plus", "equal", "KP_Add"], |ui| {
+        ui.zoom_by(1.25, ui.canvas_center())
     });
-    action(&ui, app, "actual", &["1"], |ui| {
-        ui.actual.set(true);
-        ui.refresh();
+    action(&ui, app, "zoom-out", &["minus", "KP_Subtract"], |ui| {
+        ui.zoom_by(0.8, ui.canvas_center())
     });
     action(&ui, app, "sharex", &[], Ui::import);
     action(&ui, app, "sample", &[], |ui| {
@@ -603,28 +650,48 @@ impl Ui {
             Err(err) => self.message(&format!("Could not read default frame: {err}")),
         }
         *self.doc.borrow_mut() = Some(doc);
+        self.zoom.set(1.);
+        self.pan.set((0., 0.));
         self.rebuild_frame();
         self.refresh();
+    }
+    fn png_scale(&self) -> i32 {
+        match self.export_scale.selected() {
+            1 => 2,
+            2 => 4,
+            _ => 1,
+        }
     }
     fn refresh(&self) {
         self.preview_cache.borrow_mut().take();
         let doc = self.doc.borrow();
         self.body
             .set_visible_child_name(if doc.is_some() { "image" } else { "empty" });
-        self.options.set_visible(
-            doc.is_some() && self.tool.get() != Tool::Crop && self.tool.get() != Tool::Redact,
-        );
+        self.options
+            .set_visible(doc.is_some() && self.tool.get() != Tool::Crop);
         self.framing.set_sensitive(doc.is_some());
+        self.export_scale.set_sensitive(doc.is_some());
         let selected = doc.as_ref().map(|d| frames::selection(&d.edit.frame));
         let is_default = selected.as_ref() == Some(&*self.default_frame.borrow());
         self.default_button.set_sensitive(
             selected.is_some() && (!is_default || selected == Some(DefaultFrame::Image)),
         );
         self.default_button.set_label(if is_default {
-            "Default frame"
+            "✓ Default"
         } else {
             "Make default"
         });
+        if is_default {
+            self.default_button.add_css_class("default-chip-on");
+        } else {
+            self.default_button.remove_css_class("default-chip-on");
+        }
+        self.default_button
+            .set_tooltip_text(Some(match (is_default, selected.as_ref()) {
+                (true, Some(DefaultFrame::Image)) => "Save this background as the default again",
+                (true, _) => "This frame is used for new screenshots",
+                _ => "Use this frame when opening new screenshots",
+            }));
         for (selection, button) in self.saved_buttons.borrow().iter() {
             if selected.as_ref() == Some(selection) {
                 button.add_css_class("selected-frame");
@@ -644,16 +711,15 @@ impl Ui {
         }
         if let Some(d) = doc.as_ref() {
             let (_, _, w, h) = d.edit.geometry();
-            self.canvas
-                .set_content_width(if self.actual.get() { w + 36 } else { 1 });
-            self.canvas
-                .set_content_height(if self.actual.get() { h + 36 } else { 1 });
             let note = d
                 .edit
                 .frame
                 .preset
                 .as_ref()
                 .map_or("", |(_, note)| note.as_str());
+            let scale = self.png_scale();
+            let w = i64::from(w) * i64::from(scale);
+            let h = i64::from(h) * i64::from(scale);
             self.status.set_label(&if note.is_empty() {
                 format!("{w} × {h} px · PNG")
             } else {
@@ -679,6 +745,13 @@ impl Ui {
         self.canvas.queue_draw();
     }
     fn select(&self, tool: Tool) {
+        if (self.tool.get() == Tool::Redact) != (tool == Tool::Redact) {
+            let [r, g, b, _] = self.stash_color.replace({
+                let c = self.color.rgba();
+                [c.red(), c.green(), c.blue(), 1.]
+            });
+            self.color.set_rgba(gdk::RGBA::new(r, g, b, 1.));
+        }
         self.tool.set(tool);
         if let Some(doc) = self.doc.borrow_mut().as_mut() {
             doc.draft = None;
@@ -691,8 +764,9 @@ impl Ui {
             }
         }
         self.color
-            .set_visible(!matches!(tool, Tool::Blur | Tool::Crop | Tool::Redact));
+            .set_visible(!matches!(tool, Tool::Blur | Tool::Crop));
         self.text.set_visible(tool == Tool::Text);
+        self.width.set_visible(tool != Tool::Redact);
         self.width.set_value(match tool {
             Tool::Text => 36.,
             Tool::Blur => 14.,
@@ -781,7 +855,7 @@ impl Ui {
         let result = (|| -> Result<()> {
             let doc = self.doc.borrow();
             let d = doc.as_ref().ok_or("Open an image first.")?;
-            let bytes = render::png(&d.image, &d.edit)?;
+            let bytes = render::png_scaled(&d.image, &d.edit, self.png_scale())?;
             if let Some(path) = &path {
                 capture::png_to(path, &bytes)
             } else {
@@ -1048,6 +1122,8 @@ impl Ui {
             return;
         }
         let reset = gtk::Button::with_label("Reset");
+        reset.add_css_class("flat");
+        reset.set_tooltip_text(Some("Reset this frame's settings"));
         let f = weak(self, |ui, ()| {
             let preset = ui
                 .doc
@@ -1070,16 +1146,12 @@ impl Ui {
             });
         });
         reset.connect_clicked(move |_| f(()));
-        self.frame_controls.append(&row("Adjust frame", &reset));
-        if frame.mode == Mode::Gradient {
-            self.gradient_controls(&frame);
-        }
-        if frame.mode == Mode::Image {
-            let choose = gtk::Button::with_label("Choose background image…");
-            let f = weak(self, |ui, ()| ui.open(true));
-            choose.connect_clicked(move |_| f(()));
-            self.frame_controls.append(&choose);
-        }
+        let layout = hbox(6);
+        let layout_title = heading("Layout");
+        layout_title.set_hexpand(true);
+        layout.append(&layout_title);
+        layout.append(&reset);
+        self.frame_controls.append(&layout);
         if frame.preset.is_none() {
             let adaptive = gtk::Switch::builder()
                 .active(frame.adaptive_padding)
@@ -1093,17 +1165,30 @@ impl Ui {
             self.frame_controls
                 .append(&row("Adaptive padding", &adaptive));
         }
-        for (label, value, max, update) in [
-            (
-                if frame.adaptive_padding {
-                    "Max padding"
-                } else {
-                    "Padding"
-                },
-                frame.padding.iter().sum::<f64>() / 4.,
-                512.,
-                (|f: &mut Frame, v| f.padding = [v; 4]) as fn(&mut Frame, f64),
-            ),
+        let sliders = gtk::Grid::builder()
+            .column_spacing(8)
+            .row_spacing(6)
+            .build();
+        for (index, (label, value, max, update)) in [
+            if frame.preset.is_some() {
+                (
+                    "Outer space",
+                    frame.extra_space,
+                    256.,
+                    (|f: &mut Frame, v| f.extra_space = v) as fn(&mut Frame, f64),
+                )
+            } else {
+                (
+                    if frame.adaptive_padding {
+                        "Max padding"
+                    } else {
+                        "Padding"
+                    },
+                    frame.padding.iter().sum::<f64>() / 4.,
+                    512.,
+                    (|f: &mut Frame, v| f.padding = [v; 4]) as fn(&mut Frame, f64),
+                )
+            },
             ("Image corners", frame.radius, 512., |f, v| f.radius = v),
             ("Outer corners", frame.outer_radius, 512., |f, v| {
                 f.outer_radius = v
@@ -1112,27 +1197,56 @@ impl Ui {
                 f.shadow = v;
                 f.shadow_offset = (0., v / 2.);
             }),
-        ] {
-            self.slider(label, value, max, update);
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.slider(&sliders, index as i32, label, value, max, update);
+        }
+        self.frame_controls.append(&sliders);
+        if frame.mode == Mode::Gradient {
+            let body = vbox(9);
+            self.gradient_controls(&frame, &body);
+            let expander = gtk::Expander::builder()
+                .label_widget(&heading("Gradient"))
+                .expanded(self.gradient_open.get())
+                .child(&body)
+                .build();
+            let remember = weak(self, |ui, open: bool| ui.gradient_open.set(open));
+            expander.connect_expanded_notify(move |e| remember(e.is_expanded()));
+            self.frame_controls.append(&expander);
+        }
+        if frame.mode == Mode::Image {
+            let choose = gtk::Button::with_label("Choose background image…");
+            let f = weak(self, |ui, ()| ui.open(true));
+            choose.connect_clicked(move |_| f(()));
+            self.frame_controls.append(&choose);
         }
     }
     fn slider(
         self: &Rc<Self>,
+        grid: &gtk::Grid,
+        row: i32,
         label: &str,
         value: f64,
         max: f64,
         update: impl Fn(&mut Frame, f64) + 'static,
     ) {
-        let line = vbox(2);
-        let number = gtk::Label::new(Some(&format!("{value:.0}")));
-        number.add_css_class("dim-label");
-        line.append(&row(label, &number));
+        let name = gtk::Label::new(Some(label));
+        name.set_xalign(0.);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        grid.attach(&name, 0, row, 1, 1);
         let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0., max, 1.);
+        scale.set_draw_value(false);
         scale.update_property(&[gtk::accessible::Property::Label(label)]);
         scale.set_value(value);
         scale.set_hexpand(true);
-        line.append(&scale);
-        self.frame_controls.append(&line);
+        grid.attach(&scale, 1, row, 1, 1);
+        let number = gtk::Label::new(Some(&format!("{value:.0}")));
+        number.add_css_class("dim-label");
+        number.set_width_chars(3);
+        number.set_xalign(1.);
+        grid.attach(&number, 2, row, 1, 1);
         let f = weak(self, move |ui, value| {
             number.set_label(&format!("{value:.0}"));
             ui.live_frame(|frame| update(frame, value));
@@ -1148,14 +1262,14 @@ impl Ui {
         clicks.connect_pressed(move |_, _, _, _| done(()));
         scale.add_controller(clicks);
     }
-    fn gradient_controls(self: &Rc<Self>, frame: &Frame) {
+    fn gradient_controls(self: &Rc<Self>, frame: &Frame, target: &gtk::Box) {
         let dropdown = gtk::DropDown::from_strings(&["Linear", "Radial", "Conic"]);
         dropdown.set_selected(match frame.gradient {
             Gradient::Linear => 0,
             Gradient::Radial => 1,
             Gradient::Conic => 2,
         });
-        self.frame_controls.append(&row("Type", &dropdown));
+        target.append(&row("Type", &dropdown));
         let f = weak(self, |ui, i: usize| {
             ui.change_frame(|f| {
                 f.gradient = [Gradient::Linear, Gradient::Radial, Gradient::Conic][i]
@@ -1163,19 +1277,25 @@ impl Ui {
         });
         dropdown.connect_selected_notify(move |d| f(d.selected() as usize));
         let dial = gtk::DrawingArea::builder()
-            .content_width(48)
-            .content_height(48)
+            .content_width(76)
+            .content_height(76)
             .build();
-        dial.set_tooltip_text(Some("Drag to set gradient direction"));
+        dial.set_tooltip_text(Some("Drag to set gradient direction. Snaps to 45° steps."));
         let exact = gtk::SpinButton::with_range(0., 359., 1.);
         exact.set_value(frame.angle);
         exact.update_property(&[gtk::accessible::Property::Label(
             "Gradient angle in degrees",
         )]);
-        let direction = hbox(8);
+        let direction = hbox(14);
         direction.append(&dial);
-        direction.append(&row("Angle", &exact));
-        self.frame_controls.append(&direction);
+        let angle_box = vbox(6);
+        angle_box.set_valign(gtk::Align::Center);
+        angle_box.set_hexpand(true);
+        angle_box.append(&heading("Angle"));
+        exact.set_width_chars(5);
+        angle_box.append(&exact);
+        direction.append(&angle_box);
+        target.append(&direction);
         let draw = weak(self, |ui, (c, w, h): (Context, i32, i32)| {
             let doc = ui.doc.borrow();
             let Some(d) = doc.as_ref() else {
@@ -1183,20 +1303,40 @@ impl Ui {
             };
             let (x, y) = (w as f64 / 2., h as f64 / 2.);
             let a = d.edit.frame.angle.to_radians();
-            let r = x.min(y) - 5.;
-            c.set_source_rgba(0.48, 0.55, 0.51, 0.65);
+            let r = x.min(y) - 10.;
+            c.set_source_rgba(0.48, 0.55, 0.51, 0.18);
+            c.arc(x, y, r, 0., std::f64::consts::TAU);
+            let _ = c.fill();
+            c.set_source_rgba(0.48, 0.55, 0.51, 0.75);
             c.set_line_width(2.);
             c.arc(x, y, r, 0., std::f64::consts::TAU);
             let _ = c.stroke();
-            c.set_source_rgb(0.28, 0.68, 0.45);
+            for i in 0..8 {
+                let t = f64::from(i) * std::f64::consts::FRAC_PI_4;
+                let len = if i % 2 == 0 { 6. } else { 3.5 };
+                c.move_to(x + (r - len) * t.sin(), y - (r - len) * t.cos());
+                c.line_to(x + (r - 1.) * t.sin(), y - (r - 1.) * t.cos());
+                let _ = c.stroke();
+            }
+            c.set_source_rgba(0.28, 0.68, 0.45, 0.9);
+            c.set_line_width(3.);
+            c.set_line_cap(cairo::LineCap::Round);
+            c.move_to(x, y);
+            c.line_to(x + (r - 8.) * a.sin(), y - (r - 8.) * a.cos());
+            let _ = c.stroke();
+            c.arc(x, y, 3., 0., std::f64::consts::TAU);
+            let _ = c.fill();
             c.arc(
                 x + r * a.sin(),
                 y - r * a.cos(),
-                4.5,
+                9.,
                 0.,
                 std::f64::consts::TAU,
             );
-            let _ = c.fill();
+            let _ = c.fill_preserve();
+            c.set_source_rgba(1., 1., 1., 0.95);
+            c.set_line_width(2.);
+            let _ = c.stroke();
         });
         dial.set_draw_func(move |_, c, w, h| draw((c.clone(), w, h)));
         let dial_draw = dial.downgrade();
@@ -1215,7 +1355,17 @@ impl Ui {
             if let Some(dial) = size.upgrade() {
                 let x = x - dial.width() as f64 / 2.;
                 let y = dial.height() as f64 / 2. - y;
-                spin.set_value(x.atan2(y).to_degrees().round().rem_euclid(360.));
+                if x.hypot(y) < 10. {
+                    return;
+                }
+                let degrees = x.atan2(y).to_degrees().rem_euclid(360.);
+                let nearest = (degrees / 45.).round() * 45.;
+                let degrees = if (degrees - nearest).abs() <= 4. {
+                    nearest
+                } else {
+                    degrees.round()
+                };
+                spin.set_value(degrees.rem_euclid(360.));
             }
         };
         let set_angle = Rc::new(set_angle);
@@ -1259,10 +1409,10 @@ impl Ui {
             }
         });
         palette.connect_selected_notify(move |d| f(d.selected() as usize));
-        self.frame_controls.append(&row("Palette", &palette));
-        self.frame_controls.append(&heading("Gradient stops"));
+        target.append(&row("Palette", &palette));
+        target.append(&heading("Stops"));
         let strip = gtk::DrawingArea::builder()
-            .content_height(28)
+            .content_height(52)
             .hexpand(true)
             .build();
         strip.update_property(&[gtk::accessible::Property::Label("Gradient stop preview")]);
@@ -1272,48 +1422,56 @@ impl Ui {
                 return;
             };
             let stops = &document.edit.frame.stops;
-            let x = 9.;
+            let x = STOP_MARGIN;
             let span = (f64::from(w) - 2. * x).max(1.);
-            let y = f64::from(h) / 2.;
             let gradient = cairo::LinearGradient::new(x, 0., x + span, 0.);
             for &(at, (r, g, b, a)) in stops {
                 gradient.add_color_stop_rgba(at, r, g, b, a);
             }
-            cr.set_line_width(18.);
-            cr.set_line_cap(cairo::LineCap::Round);
-            cr.move_to(x, y);
-            cr.line_to(x + span, y);
+            let _ = h;
+            round(&cr, x - 6., 4., span + 12., 22., 11.);
             if cr.set_source(&gradient).is_ok() {
-                let _ = cr.stroke();
+                let _ = cr.fill();
             }
             for &(at, (r, g, b, a)) in stops {
-                cr.arc(x + at * span, y, 6., 0., std::f64::consts::TAU);
+                let hx = x + at * span;
+                cr.set_source_rgba(0.5, 0.5, 0.5, 0.8);
+                cr.set_line_width(2.);
+                cr.move_to(hx, 24.);
+                cr.line_to(hx, STOP_HANDLE_Y - 8.);
+                let _ = cr.stroke();
+                cr.arc(hx, STOP_HANDLE_Y, 9., 0., std::f64::consts::TAU);
                 cr.set_source_rgba(r, g, b, a);
                 let _ = cr.fill_preserve();
-                cr.set_source_rgba(1., 1., 1., 0.9);
-                cr.set_line_width(1.5);
+                cr.set_source_rgba(1., 1., 1., 0.95);
+                cr.set_line_width(2.);
+                let _ = cr.stroke_preserve();
+                cr.set_source_rgba(0., 0., 0., 0.35);
+                cr.set_line_width(0.75);
                 let _ = cr.stroke();
             }
         });
         strip.set_draw_func(move |_, cr, w, h| draw((cr.clone(), w, h)));
-        self.frame_controls.append(&strip);
+        target.append(&strip);
         let mut positions = Vec::new();
         for (index, &(position, color)) in frame.stops.iter().enumerate() {
             let r = hbox(6);
-            let picker = gtk::ColorDialogButton::new(Some(
-                gtk::ColorDialog::builder().with_alpha(false).build(),
-            ));
-            picker.set_rgba(&gdk::RGBA::new(
-                color.0 as f32,
-                color.1 as f32,
-                color.2 as f32,
-                color.3 as f32,
-            ));
-            picker.update_property(&[gtk::accessible::Property::Label(&format!(
-                "Stop {} color",
-                index + 1
-            ))]);
-            r.append(&picker);
+            let f = weak(self, move |ui, c: gdk::RGBA| {
+                ui.frame_editing.set(false);
+                ui.live_frame(|f| f.stops[index].1 = rgba(c));
+            });
+            let redraw = strip.downgrade();
+            let picker = ColorPick::new(
+                rgba_of(color),
+                &format!("Stop {} color", index + 1),
+                move |c| {
+                    f(c);
+                    if let Some(strip) = redraw.upgrade() {
+                        strip.queue_draw();
+                    }
+                },
+            );
+            r.append(&picker.button);
             let at = gtk::SpinButton::with_range(0., 100., 0.5);
             at.set_value(position * 100.);
             at.set_hexpand(true);
@@ -1328,17 +1486,6 @@ impl Ui {
                 .sensitive(frame.stops.len() > 2)
                 .build();
             r.append(&remove);
-            let f = weak(self, move |ui, c: gdk::RGBA| {
-                ui.frame_editing.set(false);
-                ui.live_frame(|f| f.stops[index].1 = rgba(c));
-            });
-            let redraw = strip.downgrade();
-            picker.connect_rgba_notify(move |p| {
-                f(p.rgba());
-                if let Some(strip) = redraw.upgrade() {
-                    strip.queue_draw();
-                }
-            });
             let f = weak(self, move |ui, v| {
                 ui.live_frame(|f| f.stops[index].0 = v);
             });
@@ -1356,41 +1503,45 @@ impl Ui {
                 })
             });
             remove.connect_clicked(move |_| f(()));
-            self.frame_controls.append(&r);
+            target.append(&r);
         }
         strip.set_tooltip_text(Some("Drag a marker to move a color stop"));
         let drag = gtk::GestureDrag::new();
         drag.set_button(1);
         let selected = Rc::new(Cell::new(None));
         let start = selected.clone();
-        let begin = weak(self, move |ui, (width, x): (f64, f64)| {
+        let begin = weak(self, move |ui, (width, x, y): (f64, f64, f64)| {
+            if y < 20. {
+                start.set(None);
+                return;
+            }
             let doc = ui.doc.borrow();
             let Some(document) = doc.as_ref() else {
                 return;
             };
-            let span = (width - 18.).max(1.);
+            let span = (width - 2. * STOP_MARGIN).max(1.);
             let index = document
                 .edit
                 .frame
                 .stops
                 .iter()
                 .enumerate()
-                .map(|(i, &(at, _))| (i, (9. + at * span - x).abs()))
-                .filter(|&(_, distance)| distance <= 10.)
+                .map(|(i, &(at, _))| (i, (STOP_MARGIN + at * span - x).abs()))
+                .filter(|&(_, distance)| distance <= 14.)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| i);
-            start.set(index.map(|i| (i, x, span)));
+            start.set(index.map(|i| (i, document.edit.frame.stops[i].0, span)));
             ui.frame_editing.set(false);
         });
-        drag.connect_drag_begin(move |gesture, x, _| {
+        drag.connect_drag_begin(move |gesture, x, y| {
             if let Some(widget) = gesture.widget() {
-                begin((f64::from(widget.width()), x));
+                begin((f64::from(widget.width()), x, y));
             }
         });
         drag.connect_drag_update(move |_, dx, _| {
-            if let Some((i, x, span)) = selected.get() {
+            if let Some((i, at, span)) = selected.get() {
                 if let Some(spin) = positions[i].upgrade() {
-                    spin.set_value(((x + dx - 9.) / span * 100.).clamp(0., 100.));
+                    spin.set_value(((at + dx / span) * 100.).clamp(0., 100.).round());
                 }
             }
         });
@@ -1429,9 +1580,11 @@ impl Ui {
         });
         reverse.connect_clicked(move |_| f(()));
         controls.append(&reverse);
-        self.frame_controls.append(&controls);
+        target.append(&controls);
     }
 }
+const STOP_MARGIN: f64 = 16.;
+const STOP_HANDLE_Y: f64 = 38.;
 fn rgba(c: gdk::RGBA) -> Color {
     (
         c.red() as f64,
@@ -1449,28 +1602,214 @@ fn hex(c: u32) -> Color {
     )
 }
 
-fn transform(edit: &Edit, w: f64, h: f64, actual: bool) -> (f64, f64, f64) {
+const SWATCHES: [u32; 12] = [
+    0xff5b30, 0xe5484d, 0xf5a524, 0xf7d046, 0x30a46c, 0x12a594, 0x3e63dd, 0x8e4ec6, 0xe93d82,
+    0xffffff, 0x8b8d98, 0x0d0d0d,
+];
+fn rgba_of(c: Color) -> gdk::RGBA {
+    gdk::RGBA::new(c.0 as f32, c.1 as f32, c.2 as f32, 1.)
+}
+fn color_text(c: gdk::RGBA) -> String {
+    let byte = |v: f32| (v * 255.).round().clamp(0., 255.) as u8;
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        byte(c.red()),
+        byte(c.green()),
+        byte(c.blue())
+    )
+}
+fn swatch(color: Rc<Cell<[f32; 4]>>, width: i32, height: i32) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::builder()
+        .content_width(width)
+        .content_height(height)
+        .build();
+    area.set_draw_func(move |_, c, w, h| {
+        let [r, g, b, _] = color.get();
+        let (w, h) = (f64::from(w), f64::from(h));
+        round(c, 0., 0., w, h, 5.);
+        c.set_source_rgb(f64::from(r), f64::from(g), f64::from(b));
+        let _ = c.fill_preserve();
+        c.set_source_rgba(0.5, 0.5, 0.5, 0.55);
+        c.set_line_width(1.);
+        let _ = c.stroke();
+    });
+    area
+}
+fn round(c: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    let r = r.min(w / 2.).min(h / 2.);
+    c.new_path();
+    c.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.);
+    c.arc(x + w - r, y + h - r, r, 0., std::f64::consts::FRAC_PI_2);
+    c.arc(
+        x + r,
+        y + h - r,
+        r,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    c.arc(
+        x + r,
+        y + r,
+        r,
+        std::f64::consts::PI,
+        std::f64::consts::PI * 1.5,
+    );
+    c.close_path();
+}
+
+#[derive(Clone)]
+struct ColorPick {
+    button: gtk::MenuButton,
+    value: Rc<Cell<[f32; 4]>>,
+    apply: Rc<dyn Fn(gdk::RGBA, bool)>,
+}
+impl ColorPick {
+    fn new(initial: gdk::RGBA, label: &str, changed: impl Fn(gdk::RGBA) + 'static) -> Self {
+        let value = Rc::new(Cell::new([
+            initial.red(),
+            initial.green(),
+            initial.blue(),
+            1.,
+        ]));
+        let face = swatch(value.clone(), 26, 16);
+        let button = gtk::MenuButton::builder()
+            .child(&face)
+            .tooltip_text(label)
+            .valign(gtk::Align::Center)
+            .build();
+        button.update_property(&[gtk::accessible::Property::Label(label)]);
+        let popover = gtk::Popover::new();
+        let content = vbox(10);
+        margin(&content, 12);
+        let grid = gtk::Grid::builder()
+            .column_spacing(6)
+            .row_spacing(6)
+            .build();
+        let entry = gtk::Entry::builder()
+            .max_width_chars(9)
+            .width_chars(9)
+            .text(color_text(initial))
+            .build();
+        entry.update_property(&[gtk::accessible::Property::Label("Hex color")]);
+        let apply: Rc<dyn Fn(gdk::RGBA, bool)> = {
+            let value = value.clone();
+            let face = face.downgrade();
+            let entry = entry.downgrade();
+            Rc::new(move |color: gdk::RGBA, notify: bool| {
+                value.set([color.red(), color.green(), color.blue(), 1.]);
+                if let Some(face) = face.upgrade() {
+                    face.queue_draw();
+                }
+                if let Some(entry) = entry.upgrade() {
+                    entry.set_text(&color_text(color));
+                }
+                if notify {
+                    changed(color);
+                }
+            })
+        };
+        for (i, &c) in SWATCHES.iter().enumerate() {
+            let chip = swatch(
+                Rc::new(Cell::new({
+                    let (r, g, b, _) = hex(c);
+                    [r as f32, g as f32, b as f32, 1.]
+                })),
+                28,
+                28,
+            );
+            let b = gtk::Button::builder().child(&chip).build();
+            b.add_css_class("flat");
+            b.update_property(&[gtk::accessible::Property::Label(&color_text(rgba_of(hex(
+                c,
+            ))))]);
+            let apply = apply.clone();
+            b.connect_clicked(move |_| apply(rgba_of(hex(c)), true));
+            grid.attach(&b, (i % 6) as i32, (i / 6) as i32, 1, 1);
+        }
+        content.append(&grid);
+        let apply_entry = apply.clone();
+        entry.connect_activate(move |e| {
+            if let Ok(color) = gdk::RGBA::parse(e.text().trim()) {
+                apply_entry(color, true);
+            }
+        });
+        content.append(&entry);
+        let more = gtk::Button::with_label("More colors…");
+        let current = value.clone();
+        let apply_more = apply.clone();
+        let anchor = button.downgrade();
+        let popup = popover.downgrade();
+        more.connect_clicked(move |_| {
+            let (Some(anchor), Some(popup)) = (anchor.upgrade(), popup.upgrade()) else {
+                return;
+            };
+            popup.popdown();
+            let window = anchor.root().and_downcast::<gtk::Window>();
+            let [r, g, b, _] = current.get();
+            let apply = apply_more.clone();
+            gtk::ColorDialog::builder()
+                .with_alpha(false)
+                .build()
+                .choose_rgba(
+                    window.as_ref(),
+                    Some(&gdk::RGBA::new(r, g, b, 1.)),
+                    gtk::gio::Cancellable::NONE,
+                    move |result| {
+                        if let Ok(color) = result {
+                            apply(color, true);
+                        }
+                    },
+                );
+        });
+        content.append(&more);
+        popover.set_child(Some(&content));
+        button.set_popover(Some(&popover));
+        Self {
+            button,
+            value,
+            apply,
+        }
+    }
+    fn rgba(&self) -> gdk::RGBA {
+        let [r, g, b, a] = self.value.get();
+        gdk::RGBA::new(r, g, b, a)
+    }
+    fn set_rgba(&self, color: gdk::RGBA) {
+        (self.apply)(color, false);
+    }
+    fn set_visible(&self, visible: bool) {
+        self.button.set_visible(visible);
+    }
+}
+
+const MAX_SCALE: f64 = 32.;
+const KEEP_VISIBLE: f64 = 80.;
+
+fn fit_scale(edit: &Edit, w: f64, h: f64) -> f64 {
     let (_, _, iw, ih) = edit.geometry();
-    let scale = if actual {
-        1.
-    } else {
-        ((w - 36.) / iw as f64)
-            .min((h - 36.) / ih as f64)
-            .clamp(0.001, 1.)
-    };
+    ((w - 36.) / iw as f64)
+        .min((h - 36.) / ih as f64)
+        .clamp(0.001, 1.)
+}
+fn transform(edit: &Edit, w: f64, h: f64, zoom: f64, pan: Point) -> (f64, f64, f64) {
+    let (_, _, iw, ih) = edit.geometry();
+    let scale = (fit_scale(edit, w, h) * zoom).clamp(0.001, MAX_SCALE);
+    let pan = clamp_pan(pan, (w, h), (iw as f64 * scale, ih as f64 * scale));
     (
-        (w - iw as f64 * scale) / 2.,
-        (h - ih as f64 * scale) / 2.,
+        (w - iw as f64 * scale) / 2. + pan.0,
+        (h - ih as f64 * scale) / 2. + pan.1,
         scale,
     )
 }
+fn clamp_pan(pan: Point, view: Point, image: Point) -> Point {
+    let limit = |pan: f64, view: f64, image: f64| {
+        let reach = (image / 2. + view / 2. - KEEP_VISIBLE.min(image / 2.)).max(0.);
+        pan.clamp(-reach, reach)
+    };
+    (limit(pan.0, view.0, image.0), limit(pan.1, view.1, image.1))
+}
 fn point(ui: &Ui, edit: &Edit, (x, y): Point) -> Point {
-    let (ox, oy, scale) = transform(
-        edit,
-        ui.canvas.width() as f64,
-        ui.canvas.height() as f64,
-        ui.actual.get(),
-    );
+    let (ox, oy, scale) = ui.view(edit);
     let (left, top, _, _) = edit.geometry();
     let r = edit.crop;
     (
@@ -1478,10 +1817,84 @@ fn point(ui: &Ui, edit: &Edit, (x, y): Point) -> Point {
         r.y + ((y - oy) / scale - top).round().clamp(0., r.h),
     )
 }
+impl Ui {
+    fn view(&self, edit: &Edit) -> (f64, f64, f64) {
+        transform(
+            edit,
+            self.canvas.width() as f64,
+            self.canvas.height() as f64,
+            self.zoom.get(),
+            self.pan.get(),
+        )
+    }
+    fn canvas_center(&self) -> Point {
+        (
+            self.canvas.width() as f64 / 2.,
+            self.canvas.height() as f64 / 2.,
+        )
+    }
+    fn view_changed(&self) {
+        let label = match self.doc.borrow().as_ref() {
+            Some(d) if self.zoom.get() > 1.0001 || self.zoom.get() < 0.9999 => {
+                let (_, _, scale) = self.view(&d.edit);
+                format!("{:.0}%", scale * 100.)
+            }
+            _ => "Fit".to_owned(),
+        };
+        self.zoom_label.set_label(&label);
+        self.canvas.queue_draw();
+    }
+    fn reset_view(&self) {
+        self.zoom.set(1.);
+        self.pan.set((0., 0.));
+        self.view_changed();
+    }
+    fn actual_size(&self) {
+        let fit = match self.doc.borrow().as_ref() {
+            Some(d) => fit_scale(
+                &d.edit,
+                self.canvas.width() as f64,
+                self.canvas.height() as f64,
+            ),
+            None => return,
+        };
+        self.zoom.set(1. / fit);
+        self.pan.set((0., 0.));
+        self.view_changed();
+    }
+    fn zoom_by(&self, factor: f64, anchor: Point) {
+        let (w, h) = (self.canvas.width() as f64, self.canvas.height() as f64);
+        let result = {
+            let doc = self.doc.borrow();
+            let Some(d) = doc.as_ref() else {
+                return;
+            };
+            let (ox, oy, scale) = self.view(&d.edit);
+            let fit = fit_scale(&d.edit, w, h);
+            let (_, _, iw, ih) = d.edit.geometry();
+            let (iw, ih) = (iw as f64, ih as f64);
+            let target = (scale * factor).clamp(fit, MAX_SCALE);
+            let at = ((anchor.0 - ox) / scale, (anchor.1 - oy) / scale);
+            let pan = (
+                anchor.0 - at.0 * target - (w - iw * target) / 2.,
+                anchor.1 - at.1 * target - (h - ih * target) / 2.,
+            );
+            (target / fit, if target <= fit { (0., 0.) } else { pan })
+        };
+        self.zoom.set(result.0);
+        self.pan.set(result.1);
+        self.view_changed();
+    }
+    fn pan_by(&self, dx: f64, dy: f64) {
+        let pan = self.pan.get();
+        self.pan.set((pan.0 + dx, pan.1 + dy));
+        self.view_changed();
+    }
+}
 fn wire_canvas(ui: &Rc<Ui>) {
-    let draw = weak(ui, |ui: &Rc<Ui>, (c, w, h): (Context, i32, i32)| {
+    let draw = weak(ui, |ui: &Rc<Ui>, (c, _, _): (Context, i32, i32)| {
         if let Some(d) = ui.doc.borrow().as_ref() {
-            let (x, y, scale) = transform(&d.edit, w as f64, h as f64, ui.actual.get());
+            let (x, y, scale) = ui.view(&d.edit);
             let (_, _, iw, ih) = d.edit.geometry();
             let _ = c.save();
             c.translate(x, y);
@@ -1492,7 +1905,7 @@ fn wire_canvas(ui: &Rc<Ui>) {
             let pixel_scale = ui.canvas.scale_factor() as f64;
             let pw = (iw as f64 * scale * pixel_scale).ceil().max(1.) as i32;
             let ph = (ih as f64 * scale * pixel_scale).ceil().max(1.) as i32;
-            let cacheable = !ui.actual.get() && i64::from(pw) * i64::from(ph) <= 16_000_000;
+            let cacheable = i64::from(pw) * i64::from(ph) <= 16_000_000;
             if cacheable && !cache.as_ref().is_some_and(|(w, h, _)| *w == pw && *h == ph) {
                 *cache = (|| -> Result<_> {
                     let surface = ImageSurface::create(Format::ARgb32, pw, ph)?;
@@ -1526,6 +1939,10 @@ fn wire_canvas(ui: &Rc<Ui>) {
     let begin = weak(ui, |ui, (x, y): Point| {
         ui.canvas.grab_focus();
         ui.start.set((x, y));
+        if ui.space.get() {
+            ui.pan_base.set(Some(ui.pan.get()));
+            return;
+        }
         if ui.tool.get() == Tool::Text {
             return;
         }
@@ -1542,6 +1959,11 @@ fn wire_canvas(ui: &Rc<Ui>) {
     });
     gesture.connect_drag_begin(move |_, x, y| begin((x, y)));
     let update = weak(ui, |ui, (x, y, shift): (f64, f64, bool)| {
+        if let Some(base) = ui.pan_base.get() {
+            ui.pan.set((base.0 + x, base.1 + y));
+            ui.view_changed();
+            return;
+        }
         if let Some(doc) = ui.doc.borrow_mut().as_mut() {
             let start = ui.start.get();
             let mut p = point(ui, &doc.edit, (start.0 + x, start.1 + y));
@@ -1580,6 +2002,9 @@ fn wire_canvas(ui: &Rc<Ui>) {
         ))
     });
     let finish = weak(ui, |ui, ()| {
+        if ui.pan_base.take().is_some() {
+            return;
+        }
         if let Some(doc) = ui.doc.borrow_mut().as_mut() {
             if let Some(mark) = doc.draft.take() {
                 let bounds = Rect::between(mark.points[0], *mark.points.last().unwrap());
@@ -1617,6 +2042,59 @@ fn wire_canvas(ui: &Rc<Ui>) {
     });
     gesture.connect_cancel(move |_, _| cancel(()));
     ui.canvas.add_controller(gesture);
+    let middle = gtk::GestureDrag::new();
+    middle.set_button(2);
+    let begin = weak(ui, |ui, ()| ui.pan_base.set(Some(ui.pan.get())));
+    middle.connect_drag_begin(move |_, _, _| begin(()));
+    let update = weak(ui, |ui, (x, y): Point| {
+        if let Some(base) = ui.pan_base.get() {
+            ui.pan.set((base.0 + x, base.1 + y));
+            ui.view_changed();
+        }
+    });
+    middle.connect_drag_update(move |_, x, y| update((x, y)));
+    let end = weak(ui, |ui, ()| ui.pan_base.set(None));
+    middle.connect_drag_end(move |_, _, _| end(()));
+    ui.canvas.add_controller(middle);
+    let motion = gtk::EventControllerMotion::new();
+    let track = weak(ui, |ui, p: Point| ui.pointer.set(p));
+    motion.connect_motion(move |_, x, y| track((x, y)));
+    ui.canvas.add_controller(motion);
+    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+    let on_wheel = weak(ui, |ui, (dx, dy, mods): (f64, f64, gdk::ModifierType)| {
+        if mods.contains(gdk::ModifierType::CONTROL_MASK) {
+            ui.zoom_by((-dy * 0.15).exp(), ui.pointer.get());
+        } else if ui.zoom.get() > 1.0001 {
+            let (dx, dy) = if mods.contains(gdk::ModifierType::SHIFT_MASK) && dx == 0. {
+                (dy, 0.)
+            } else {
+                (dx, dy)
+            };
+            ui.pan_by(-dx * 40., -dy * 40.);
+        }
+    });
+    wheel.connect_scroll(move |c, dx, dy| {
+        on_wheel((dx, dy, c.current_event_state()));
+        glib::Propagation::Stop
+    });
+    ui.canvas.add_controller(wheel);
+    let pinch = gtk::GestureZoom::new();
+    let base = Rc::new(Cell::new(1.));
+    let start = base.clone();
+    let begin = weak(ui, move |ui, ()| start.set(ui.zoom.get()));
+    pinch.connect_begin(move |_, _| begin(()));
+    let pinch_scale = weak(ui, move |ui, (scale, center): (f64, Point)| {
+        let current = ui.zoom.get();
+        let wanted = base.get() * scale;
+        if current > 0. {
+            ui.zoom_by(wanted / current, center);
+        }
+    });
+    pinch.connect_scale_changed(move |g, scale| {
+        let center = g.bounding_box_center().unwrap_or((0., 0.));
+        pinch_scale((scale, center));
+    });
+    ui.canvas.add_controller(pinch);
     let text_click = gtk::GestureClick::new();
     text_click.set_button(1);
     let click = weak(ui, |ui, (x, y): Point| {
@@ -1645,10 +2123,22 @@ fn wire_canvas(ui: &Rc<Ui>) {
     ui.canvas.add_controller(text_click);
     let keys = gtk::EventControllerKey::new();
     let w = Rc::downgrade(ui);
+    let released = w.clone();
+    keys.connect_key_released(move |_, key, _, _| {
+        if key == gdk::Key::space {
+            if let Some(ui) = released.upgrade() {
+                ui.space.set(false);
+            }
+        }
+    });
     keys.connect_key_pressed(move |_, key, _, mods| {
         let Some(ui) = w.upgrade() else {
             return glib::Propagation::Proceed;
         };
+        if key == gdk::Key::space {
+            ui.space.set(true);
+            return glib::Propagation::Stop;
+        }
         if mods.intersects(
             gdk::ModifierType::CONTROL_MASK
                 | gdk::ModifierType::ALT_MASK
@@ -1774,4 +2264,40 @@ fn settings(parent: &adw::ApplicationWindow) {
     });
     win.add(&page);
     win.present();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edit(w: i32, h: i32) -> Edit {
+        Edit::new(&ImageSurface::create(Format::ARgb32, w, h).unwrap())
+    }
+
+    #[test]
+    fn fit_view_is_centered_and_never_enlarges() {
+        let (x, y, scale) = transform(&edit(100, 50), 400., 300., 1., (0., 0.));
+        assert_eq!((x, y, scale), (150., 125., 1.));
+        let (x, _, scale) = transform(&edit(1000, 500), 536., 400., 1., (0., 0.));
+        assert!((scale - 0.5).abs() < 1e-9 && (x - 18.).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zoomed_view_scales_from_the_fit_size_and_pans() {
+        let image = edit(1000, 500);
+        let (_, _, fit) = transform(&image, 536., 400., 1., (0., 0.));
+        let (x, _, scale) = transform(&image, 536., 400., 2., (10., 0.));
+        assert!((scale - fit * 2.).abs() < 1e-9);
+        assert!((x - ((536. - 1000.) / 2. + 10.)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn panning_cannot_lose_the_image() {
+        let (px, py) = clamp_pan((9999., -9999.), (500., 400.), (1000., 800.));
+        assert!(px < 1000. && py > -1000.);
+        let origin = (500. - 1000.) / 2. + px;
+        assert!(origin <= 500. - KEEP_VISIBLE + 1e-9);
+        let (nx, _) = clamp_pan((-9999., 0.), (500., 400.), (1000., 800.));
+        assert!((500. - 1000.) / 2. + nx + 1000. >= KEEP_VISIBLE - 1e-9);
+    }
 }

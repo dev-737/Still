@@ -183,6 +183,7 @@ pub struct Frame {
     pub mode: Mode,
     pub padding: [f64; 4],
     pub adaptive_padding: bool,
+    pub extra_space: f64,
     pub radius: f64,
     pub outer_radius: f64,
     pub preset: Option<(String, String)>,
@@ -204,6 +205,7 @@ impl Default for Frame {
             mode: Mode::Original,
             padding: [72.; 4],
             adaptive_padding: true,
+            extra_space: 0.,
             radius: 18.,
             outer_radius: 0.,
             preset: None,
@@ -251,6 +253,7 @@ impl Edit {
         let f = &self.frame;
         let scale = self.frame_scale();
         let padding = f.padding.map(|p| (p * scale).round());
+        let extra = self.extra_space();
         let [l, t, r, b] = match f.mode {
             Mode::Original => [0.; 4],
             Mode::Shadow if f.shadow > 0. => padding.map(|p| {
@@ -262,13 +265,21 @@ impl Edit {
                 }
             }),
             _ => padding,
-        };
+        }
+        .map(|p| p + extra);
         (
             l,
             t,
             (l + self.crop.w + r).ceil() as i32,
             (t + self.crop.h + b).ceil() as i32,
         )
+    }
+    fn extra_space(&self) -> f64 {
+        if self.frame.mode == Mode::Original {
+            0.
+        } else {
+            self.frame.extra_space.round().max(0.)
+        }
     }
 }
 
@@ -383,7 +394,7 @@ pub fn paint(c: &Context, image: &ImageSurface, edit: &Edit, draft: Option<&Mark
         (shadow_space(f) * edit.frame_scale()).ceil()
     } else {
         0.
-    };
+    } + edit.extra_space();
     let canvas = Rect {
         x: inset,
         y: inset,
@@ -542,7 +553,7 @@ fn draw(c: &Context, image: &ImageSurface, m: &Mark) -> Result<()> {
                     c.set_dash(&[], 0.);
                 }
                 Tool::Redact => {
-                    source(c, (0.05, 0.05, 0.05, 1.));
+                    source(c, (m.color.0, m.color.1, m.color.2, 1.));
                     c.fill()?;
                 }
                 _ => c.stroke()?,
@@ -628,9 +639,21 @@ fn draw(c: &Context, image: &ImageSurface, m: &Mark) -> Result<()> {
 }
 
 pub fn png(image: &ImageSurface, edit: &Edit) -> Result<Vec<u8>> {
+    png_scaled(image, edit, 1)
+}
+
+pub fn png_scaled(image: &ImageSurface, edit: &Edit, scale: i32) -> Result<Vec<u8>> {
     let (_, _, w, h) = edit.geometry();
-    let result = ImageSurface::create(Format::ARgb32, w, h)?;
+    let width = w.checked_mul(scale).ok_or("Export width is too large.")?;
+    let height = h.checked_mul(scale).ok_or("Export height is too large.")?;
+    if scale > 1
+        && (i64::from(width) * i64::from(height) > 64_000_000 || width > 32_767 || height > 32_767)
+    {
+        return Err("This export is too large. Choose a smaller export scale.".into());
+    }
+    let result = ImageSurface::create(Format::ARgb32, width, height)?;
     let c = Context::new(&result)?;
+    c.scale(f64::from(scale), f64::from(scale));
     paint(&c, image, edit, None)?;
     let mut bytes = Vec::new();
     result.write_to_png(&mut bytes)?;
@@ -641,6 +664,33 @@ pub fn png(image: &ImageSurface, edit: &Edit) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn scaled_png_renders_vector_marks_at_output_resolution() {
+        let image = ImageSurface::create(Format::ARgb32, 39, 25).unwrap();
+        let mut edit = Edit::new(&image);
+        edit.marks.push(Mark {
+            tool: Tool::Rectangle,
+            points: vec![(4.25, 4.25), (16.25, 16.25)],
+            color: (1., 0., 0., 1.),
+            width: 0.5,
+            text: String::new(),
+        });
+        let bytes = png_scaled(&image, &edit, 4).unwrap();
+        let mut result = ImageSurface::create_from_png(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!((result.width(), result.height()), (156, 100));
+        let stride = result.stride() as usize;
+        let pixels = result.data().unwrap();
+        let pixel = |x: usize, y: usize| {
+            u32::from_ne_bytes(
+                pixels[y * stride + x * 4..y * stride + x * 4 + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(pixel(30, 16), 0xffff0000);
+        assert_eq!(pixel(30, 18), 0);
+    }
 
     #[test]
     fn adaptive_padding_tracks_the_short_edge() {
@@ -655,6 +705,38 @@ mod tests {
         edit.crop.h = 25.;
         edit.frame.adaptive_padding = false;
         assert_eq!(edit.geometry(), (72., 72., 183, 169));
+    }
+
+    #[test]
+    fn extra_space_keeps_preset_margins() {
+        let image = ImageSurface::create(Format::ARgb32, 100, 50).unwrap();
+        let mut edit = Edit::new(&image);
+        edit.frame.mode = Mode::Shadow;
+        edit.frame.shadow = 0.;
+        edit.frame.adaptive_padding = false;
+        edit.frame.padding = [10., 40., 10., 10.];
+        assert_eq!(edit.geometry(), (10., 40., 120, 100));
+        edit.frame.extra_space = 8.;
+        assert_eq!(edit.geometry(), (18., 48., 136, 116));
+    }
+
+    #[test]
+    fn redact_uses_its_own_color() {
+        let image = ImageSurface::create(Format::ARgb32, 16, 16).unwrap();
+        let mut edit = Edit::new(&image);
+        edit.marks.push(Mark {
+            tool: Tool::Redact,
+            points: vec![(0., 0.), (16., 16.)],
+            color: (0., 0., 1., 1.),
+            width: 1.,
+            text: String::new(),
+        });
+        let mut output =
+            ImageSurface::create_from_png(&mut Cursor::new(png(&image, &edit).unwrap())).unwrap();
+        let pixel = 8 * output.stride() as usize + 8 * 4;
+        let value =
+            u32::from_ne_bytes(output.data().unwrap()[pixel..pixel + 4].try_into().unwrap());
+        assert_eq!(value & 0xffffff, 0x0000ff);
     }
 
     #[test]
