@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="docs/images/banner.webp" alt="Still, a screenshot editor for Wayland" width="100%">
+  <img src="docs/images/banner.webp" alt="Still, a screenshot editor for Wayland and X11" width="100%">
 </p>
 
 # Still
 
-Capture a region, paste it straight away, or click its preview to open the editor. Still is a native Linux app built with Rust, GTK4, and libadwaita. It keeps your screenshot at its captured resolution through editing and PNG export.
+Capture a region, paste it straight away, or click its preview to open the editor. Still is a native Linux app for Wayland and X11, built with Rust, GTK4, and libadwaita. It keeps your screenshot at its captured resolution through editing and PNG export.
 
 ## ShareX frames
 
@@ -64,7 +64,7 @@ To publish a release, commit the version in `Cargo.toml` and `Cargo.lock`, then 
 
 ## Build and run
 
-Install Rust, GTK 4.12 or newer, libadwaita 1.4 or newer, and the development files for GTK, libadwaita, Cairo, Pango, and Graphene. Region capture uses `slurp` and `grim`, clipboard export uses `wl-copy`, and clickable previews use `notify-send` with an action-capable notification daemon.
+Install Rust, GTK 4.12 or newer, libadwaita 1.4 or newer, and the development files for GTK, libadwaita, Cairo, Pango, and Graphene. On Wayland, region capture uses `slurp` and `grim` and clipboard export uses `wl-copy`. On X11 (detected when `WAYLAND_DISPLAY` is unset), region capture uses `maim` and clipboard export uses `xclip`. Clickable previews use `notify-send` with an action-capable notification daemon.
 
 ```sh
 cargo build --release --locked

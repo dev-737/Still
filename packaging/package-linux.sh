@@ -40,7 +40,8 @@ Priority: optional
 Architecture: $deb_arch
 Maintainer: Still contributors <73829355+dev-737@users.noreply.github.com>
 Depends: libc6 (>= 2.39), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.4), libcairo2, libpango-1.0-0, libpangocairo-1.0-0, libgdk-pixbuf-2.0-0, libglib2.0-0t64, grim, slurp, wl-clipboard, libnotify-bin
-Description: Screenshot editor for Wayland
+Recommends: maim, xclip
+Description: Screenshot editor for Wayland and X11
  Capture regions, annotate images, and import ShareX framing presets.
 CONTROL
 dpkg-deb --root-owner-group --build "$deb" "$output/still_${version}_${deb_arch}.deb"
@@ -50,10 +51,11 @@ cat > "$root/still.spec" <<SPEC
 Name: still
 Version: $version
 Release: 1
-Summary: Screenshot editor for Wayland
-License: LicenseRef-Still
+Summary: Screenshot editor for Wayland and X11
+License: GPL-3.0-or-later
 URL: https://github.com/dev-737/Still
 Requires: gtk4 >= 4.12, libadwaita >= 1.4, grim, slurp, wl-clipboard, libnotify
+Recommends: maim, xclip
 
 %description
 Capture regions, annotate images, and import ShareX framing presets.

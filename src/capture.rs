@@ -198,8 +198,60 @@ pub fn run_actions() -> Result<(Option<Vec<u8>>, Vec<String>)> {
     Ok((editor, errors))
 }
 
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+#[derive(Clone, Copy, PartialEq)]
+enum Session {
+    Wayland,
+    X11,
+}
+
+impl Session {
+    fn detect() -> Self {
+        let has = |name: &str| env::var_os(name).is_some_and(|value| !value.is_empty());
+        if has("WAYLAND_DISPLAY") || !has("DISPLAY") {
+            Session::Wayland
+        } else {
+            Session::X11
+        }
+    }
+}
+
+fn spawn_error(program: &str, error: std::io::Error) -> Box<dyn std::error::Error> {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        format!("{program} is not installed. Install it to capture on this desktop.").into()
+    } else {
+        error.into()
+    }
+}
+
+fn output_of(program: &str, args: &[&str]) -> Result<std::process::Output> {
+    Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| spawn_error(program, error))
+}
+
+fn captured_png(output: std::process::Output, program: &str) -> Result<Vec<u8>> {
+    if output.status.success() && output.stdout.starts_with(PNG_SIGNATURE) {
+        return Ok(output.stdout);
+    }
+    Err(format!(
+        "{program} could not capture the region: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+    .into())
+}
+
 pub fn region() -> Result<Option<Vec<u8>>> {
-    let selected = Command::new("slurp").output()?;
+    match Session::detect() {
+        Session::Wayland => wayland_region(),
+        Session::X11 => x11_region(),
+    }
+}
+
+fn wayland_region() -> Result<Option<Vec<u8>>> {
+    let selected = output_of("slurp", &[])?;
     if !selected.status.success() {
         if selected.stderr.is_empty() {
             return Ok(None);
@@ -213,27 +265,36 @@ pub fn region() -> Result<Option<Vec<u8>>> {
     if geometry.is_empty() {
         return Ok(None);
     }
-    let png = Command::new("grim").args(["-g", geometry, "-"]).output()?;
-    if !png.status.success() || !png.stdout.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Err(format!(
-            "grim could not capture the region: {}",
-            String::from_utf8_lossy(&png.stderr).trim()
-        )
-        .into());
+    let png = output_of("grim", &["-g", geometry, "-"])?;
+    captured_png(png, "grim").map(Some)
+}
+
+fn x11_region() -> Result<Option<Vec<u8>>> {
+    let png = output_of("maim", &["--select", "--hidecursor", "--format=png"])?;
+    if !png.status.success() && png.stdout.is_empty() {
+        let message = String::from_utf8_lossy(&png.stderr);
+        if message.contains("cancelled") || message.trim().is_empty() {
+            return Ok(None);
+        }
     }
-    Ok(Some(png.stdout))
+    captured_png(png, "maim").map(Some)
 }
 
 pub fn copy(png: &[u8]) -> Result<()> {
-    let mut child = Command::new("wl-copy")
-        .args(["--type", "image/png"])
+    let (program, args): (&str, &[&str]) = match Session::detect() {
+        Session::Wayland => ("wl-copy", &["--type", "image/png"]),
+        Session::X11 => ("xclip", &["-selection", "clipboard", "-t", "image/png"]),
+    };
+    let mut child = Command::new(program)
+        .args(args)
         .stdin(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| spawn_error(program, error))?;
     let result = child.stdin.take().unwrap().write_all(png);
     let status = child.wait()?;
     result?;
     if !status.success() {
-        return Err("wl-copy could not set the clipboard.".into());
+        return Err(format!("{program} could not set the clipboard.").into());
     }
     Ok(())
 }
