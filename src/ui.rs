@@ -63,6 +63,7 @@ struct Ui {
     saved_frames: gtk::Box,
     saved_buttons: RefCell<Vec<(DefaultFrame, gtk::Button)>>,
     default_frame: RefCell<DefaultFrame>,
+    default_style: RefCell<Option<frames::FrameStyle>>,
     default_button: gtk::Button,
     tool: Cell<Tool>,
     buttons: Vec<(Tool, gtk::Button)>,
@@ -79,6 +80,9 @@ struct Ui {
     space: Cell<bool>,
     zoom_label: gtk::Label,
     gradient_open: Cell<bool>,
+    palettes: RefCell<Vec<frames::Palette>>,
+    palette_row: RefCell<Option<(gtk::DropDown, gtk::MenuButton, gtk::Button)>>,
+    palette_sync: Cell<bool>,
     export_scale: gtk::DropDown,
     start: Cell<Point>,
     frame_editing: Cell<bool>,
@@ -110,6 +114,28 @@ fn row(label: &str, control: &impl IsA<gtk::Widget>) -> gtk::Box {
     r.append(&l);
     r.append(control);
     r
+}
+fn pass_scroll(w: &impl IsA<gtk::Widget>) {
+    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
+    wheel.connect_scroll(|wheel, _, dy| {
+        let Some(view) = wheel
+            .widget()
+            .and_then(|w| w.ancestor(gtk::ScrolledWindow::static_type()))
+            .and_downcast::<gtk::ScrolledWindow>()
+        else {
+            return glib::Propagation::Proceed;
+        };
+        let adjustment = view.vadjustment();
+        let step = if wheel.unit() == gdk::ScrollUnit::Surface {
+            dy
+        } else {
+            dy * adjustment.page_size().powf(2. / 3.)
+        };
+        adjustment.set_value(adjustment.value() + step);
+        glib::Propagation::Stop
+    });
+    w.add_controller(wheel);
 }
 fn clear(b: &gtk::Box) {
     while let Some(child) = b.first_child() {
@@ -413,7 +439,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     margin(&framing, 13);
     framing.add_css_class("framing");
     let default_button = button("Make default", "win.frame-default");
-    default_button.add_css_class("default-chip");
+    default_button.set_hexpand(true);
     let sharex_menu = gio::Menu::new();
     sharex_menu.append(Some("Import ShareX preset…"), Some("win.sharex"));
     sharex_menu.append(Some("Try ShareX sample"), Some("win.sample"));
@@ -428,7 +454,6 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let title = heading("Framing");
     title.set_hexpand(true);
     title_row.append(&title);
-    title_row.append(&default_button);
     title_row.append(&more);
     framing.append(&title_row);
     let modes = gtk::FlowBox::builder()
@@ -492,14 +517,22 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .propagate_natural_width(false)
         .child(&framing)
         .build();
-    inspector.add_css_class("inspector");
+    inspector.set_vexpand(true);
+    let default_bar = hbox(0);
+    default_bar.add_css_class("default-bar");
+    default_bar.append(&default_button);
+    let side = vbox(0);
+    side.add_css_class("inspector");
+    side.append(&inspector);
+    side.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    side.append(&default_bar);
     let split = gtk::Paned::new(gtk::Orientation::Horizontal);
     split.add_css_class("editor-split");
     split.set_hexpand(true);
     split.set_vexpand(true);
     split.set_wide_handle(true);
     split.set_start_child(Some(&center));
-    split.set_end_child(Some(&inspector));
+    split.set_end_child(Some(&side));
     split.set_resize_start_child(true);
     split.set_resize_end_child(false);
     split.set_shrink_start_child(false);
@@ -563,6 +596,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         saved_frames,
         saved_buttons: RefCell::new(Vec::new()),
         default_frame: RefCell::new(frames::default_frame().unwrap_or_default()),
+        default_style: RefCell::new(None),
         default_button,
         tool: Cell::new(Tool::Crop),
         buttons,
@@ -579,6 +613,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         space: Cell::new(false),
         zoom_label,
         gradient_open: Cell::new(true),
+        palettes: RefCell::new(frames::palettes()),
+        palette_row: RefCell::new(None),
+        palette_sync: Cell::new(false),
         export_scale,
         start: Cell::new((0., 0.)),
         frame_editing: Cell::new(false),
@@ -690,8 +727,12 @@ impl Ui {
         match frames::default_frame() {
             Ok(selection) => {
                 self.default_frame.replace(selection.clone());
-                match frames::load(&selection) {
-                    Ok(frame) => doc.edit.frame = frame,
+                match frames::load_default(&selection) {
+                    Ok(frame) => {
+                        self.default_style
+                            .replace(Some(frames::FrameStyle::from(&frame)));
+                        doc.edit.frame = frame;
+                    }
                     Err(err) => self.message(&format!("Default frame unavailable: {err}")),
                 }
             }
@@ -720,12 +761,18 @@ impl Ui {
         self.framing.set_sensitive(doc.is_some());
         self.export_scale.set_sensitive(doc.is_some());
         let selected = doc.as_ref().map(|d| frames::selection(&d.edit.frame));
-        let is_default = selected.as_ref() == Some(&*self.default_frame.borrow());
+        let same_frame = selected.as_ref() == Some(&*self.default_frame.borrow());
+        let is_default = same_frame
+            && (selected == Some(DefaultFrame::Original)
+                || doc.as_ref().map(|d| frames::FrameStyle::from(&d.edit.frame))
+                    == *self.default_style.borrow());
         self.default_button.set_sensitive(
             selected.is_some() && (!is_default || selected == Some(DefaultFrame::Image)),
         );
         self.default_button.set_label(if is_default {
-            "✓ Default"
+            "✓ Default for new screenshots"
+        } else if same_frame {
+            "Update default"
         } else {
             "Make default"
         });
@@ -737,8 +784,8 @@ impl Ui {
         self.default_button
             .set_tooltip_text(Some(match (is_default, selected.as_ref()) {
                 (true, Some(DefaultFrame::Image)) => "Save this background as the default again",
-                (true, _) => "This frame is used for new screenshots",
-                _ => "Use this frame when opening new screenshots",
+                (true, _) => "This frame and its settings are used for new screenshots",
+                _ => "Use this frame and its settings for new screenshots",
             }));
         for (selection, button) in self.saved_buttons.borrow().iter() {
             if selected.as_ref() == Some(selection) {
@@ -1088,7 +1135,7 @@ impl Ui {
         dialog.present();
     }
     fn save_default(&self) {
-        let result = (|| -> Result<DefaultFrame> {
+        let result = (|| -> Result<(DefaultFrame, frames::FrameStyle)> {
             let document = self.doc.borrow();
             let frame = &document.as_ref().ok_or("Open an image first.")?.edit.frame;
             let selection = frames::selection(frame);
@@ -1101,11 +1148,13 @@ impl Ui {
                 )?;
             }
             frames::set_default(&selection)?;
-            Ok(selection)
+            frames::set_default_style(frame)?;
+            Ok((selection, frames::FrameStyle::from(frame)))
         })();
         match result {
-            Ok(selection) => {
+            Ok((selection, style)) => {
                 self.default_frame.replace(selection);
+                self.default_style.replace(Some(style));
                 self.refresh();
                 self.message("Default frame updated.");
             }
@@ -1139,7 +1188,103 @@ impl Ui {
             }
             f(&mut d.edit.frame);
         }
+        self.sync_palette();
         self.refresh();
+    }
+    fn all_palettes(&self) -> Vec<frames::Palette> {
+        let mut all: Vec<_> = [
+            ("Lagoon", [0x49df9a, 0x32bbc2, 0x4078db]),
+            ("Sunset", [0xffad72, 0xf36b87, 0x6c50b1]),
+            ("Lavender", [0xffe0ee, 0xc5adff, 0x768ceb]),
+            ("Slate", [0xb8d6d6, 0x536f85, 0x242b45]),
+        ]
+        .into_iter()
+        .map(|(name, colors)| frames::Palette {
+            name: name.to_owned(),
+            stops: colors
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| (i as f64 / 2., hex(c)))
+                .collect(),
+        })
+        .collect();
+        all.extend(self.palettes.borrow().iter().cloned());
+        all
+    }
+    fn stops(&self) -> Option<Vec<(f64, Color)>> {
+        self.doc
+            .borrow()
+            .as_ref()
+            .map(|d| d.edit.frame.stops.clone())
+    }
+    fn sync_palette(&self) {
+        let Some((pick, save, remove)) = self.palette_row.borrow().clone() else {
+            return;
+        };
+        let Some(stops) = self.stops() else {
+            return;
+        };
+        let all = self.all_palettes();
+        let builtin = all.len() - self.palettes.borrow().len();
+        let current = all.iter().position(|p| same_stops(&p.stops, &stops));
+        self.palette_sync.set(true);
+        pick.set_selected(current.map_or(0, |i| i as u32 + 1));
+        self.palette_sync.set(false);
+        save.set_sensitive(current.is_none());
+        remove.set_sensitive(current.is_some_and(|i| i >= builtin));
+    }
+    fn store_palettes(self: &Rc<Self>, all: Vec<frames::Palette>) -> bool {
+        match frames::set_palettes(&all) {
+            Ok(()) => {
+                self.palettes.replace(all);
+                self.rebuild_frame();
+                true
+            }
+            Err(err) => {
+                self.message(&err.to_string());
+                false
+            }
+        }
+    }
+    fn save_palette(self: &Rc<Self>, name: &str) {
+        let Some(stops) = self.stops() else {
+            return;
+        };
+        let mut all = self.palettes.borrow().clone();
+        let name = if name.is_empty() {
+            format!("Palette {}", all.len() + 1)
+        } else {
+            name.to_owned()
+        };
+        let text = format!("Saved “{name}”.");
+        all.push(frames::Palette { name, stops });
+        if self.store_palettes(all) {
+            self.message(&text);
+        }
+    }
+    fn delete_palette(self: &Rc<Self>) {
+        let Some(stops) = self.stops() else {
+            return;
+        };
+        let mut all = self.palettes.borrow().clone();
+        let Some(index) = all.iter().position(|p| same_stops(&p.stops, &stops)) else {
+            return;
+        };
+        let removed = all.remove(index);
+        if !self.store_palettes(all) {
+            return;
+        }
+        let toast = adw::Toast::builder()
+            .title(format!("Deleted “{}”.", removed.name))
+            .button_label("Undo")
+            .build();
+        let undo = weak(self, move |ui, ()| {
+            let mut all = ui.palettes.borrow().clone();
+            all.insert(index.min(all.len()), removed.clone());
+            ui.store_palettes(all);
+        });
+        toast.connect_button_clicked(move |_| undo(()));
+        self.toast.add_toast(toast);
     }
     fn rebuild_frame(self: &Rc<Self>) {
         clear(&self.frame_controls);
@@ -1289,6 +1434,7 @@ impl Ui {
         scale.update_property(&[gtk::accessible::Property::Label(label)]);
         scale.set_value(value);
         scale.set_hexpand(true);
+        pass_scroll(&scale);
         grid.attach(&scale, 1, row, 1, 1);
         let number = gtk::Label::new(Some(&format!("{value:.0}")));
         number.add_css_class("dim-label");
@@ -1317,7 +1463,7 @@ impl Ui {
             Gradient::Radial => 1,
             Gradient::Conic => 2,
         });
-        target.append(&row("Type", &dropdown));
+        let kind = row("Type", &dropdown);
         let f = weak(self, |ui, i: usize| {
             ui.change_frame(|f| {
                 f.gradient = [Gradient::Linear, Gradient::Radial, Gradient::Conic][i]
@@ -1331,6 +1477,7 @@ impl Ui {
         dial.set_tooltip_text(Some("Drag to set gradient direction. Snaps to 45° steps."));
         let exact = gtk::SpinButton::with_range(0., 359., 1.);
         exact.set_value(frame.angle);
+        pass_scroll(&exact);
         exact.update_property(&[gtk::accessible::Property::Label(
             "Gradient angle in degrees",
         )]);
@@ -1343,7 +1490,6 @@ impl Ui {
         exact.set_width_chars(5);
         angle_box.append(&exact);
         direction.append(&angle_box);
-        target.append(&direction);
         let draw = weak(self, |ui, (c, w, h): (Context, i32, i32)| {
             let doc = ui.doc.borrow();
             let Some(d) = doc.as_ref() else {
@@ -1432,33 +1578,118 @@ impl Ui {
         let done = weak(self, |ui, ()| ui.frame_editing.set(false));
         drag.connect_drag_end(move |_, _, _| done(()));
         dial.add_controller(drag);
-        let palette = gtk::DropDown::from_strings(&[
-            "Choose a palette",
-            "Lagoon",
-            "Sunset",
-            "Lavender",
-            "Slate",
-        ]);
-        let f = weak(self, |ui, index: usize| {
-            let presets = [
-                [0x49df9a, 0x32bbc2, 0x4078db],
-                [0xffad72, 0xf36b87, 0x6c50b1],
-                [0xffe0ee, 0xc5adff, 0x768ceb],
-                [0xb8d6d6, 0x536f85, 0x242b45],
-            ];
-            if let Some(colors) = index.checked_sub(1).and_then(|i| presets.get(i)) {
-                ui.change_frame(|f| {
-                    f.stops = colors
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &c)| (i as f64 / 2., hex(c)))
-                        .collect()
+        let all = Rc::new(self.all_palettes());
+        let names: Vec<&str> = std::iter::once("Custom")
+            .chain(all.iter().map(|p| p.name.as_str()))
+            .collect();
+        let palette = gtk::DropDown::from_strings(&names);
+        palette.set_hexpand(true);
+        palette.set_tooltip_text(Some("Color palette"));
+        palette.update_property(&[gtk::accessible::Property::Label("Color palette")]);
+        let factory = gtk::SignalListItemFactory::new();
+        factory.connect_setup(|_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let chip = gtk::DrawingArea::builder()
+                .content_width(30)
+                .content_height(14)
+                .valign(gtk::Align::Center)
+                .build();
+            let label = gtk::Label::new(None);
+            label.set_xalign(0.);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            let entry = hbox(8);
+            entry.append(&chip);
+            entry.append(&label);
+            item.set_child(Some(&entry));
+        });
+        let shown = all.clone();
+        factory.connect_bind(move |_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let Some(entry) = item.child() else {
+                return;
+            };
+            if let Some(label) = entry.last_child().and_downcast::<gtk::Label>() {
+                let name = item.item().and_downcast::<gtk::StringObject>();
+                label.set_label(&name.map(|n| n.string()).unwrap_or_default());
+            }
+            if let Some(chip) = entry.first_child().and_downcast::<gtk::DrawingArea>() {
+                let stops = (item.position() as usize)
+                    .checked_sub(1)
+                    .and_then(|i| shown.get(i))
+                    .map(|p| p.stops.clone());
+                chip.set_visible(stops.is_some());
+                chip.set_draw_func(move |_, c, w, h| {
+                    let gradient = cairo::LinearGradient::new(0., 0., f64::from(w), 0.);
+                    for &(at, (r, g, b, a)) in stops.iter().flatten() {
+                        gradient.add_color_stop_rgba(at, r, g, b, a);
+                    }
+                    round(c, 0., 0., f64::from(w), f64::from(h), 4.);
+                    if c.set_source(&gradient).is_ok() {
+                        let _ = c.fill();
+                    }
                 });
             }
         });
+        palette.set_factory(Some(&factory));
+        let f = weak(self, move |ui, index: usize| {
+            if ui.palette_sync.get() {
+                return;
+            }
+            match index.checked_sub(1).and_then(|i| all.get(i)) {
+                Some(p) => ui.change_frame(|f| f.stops = p.stops.clone()),
+                None => ui.sync_palette(),
+            }
+        });
         palette.connect_selected_notify(move |d| f(d.selected() as usize));
-        target.append(&row("Palette", &palette));
-        target.append(&heading("Stops"));
+        let name = gtk::Entry::builder()
+            .placeholder_text("Palette name")
+            .max_length(40)
+            .build();
+        name.update_property(&[gtk::accessible::Property::Label("Palette name")]);
+        let confirm = gtk::Button::with_label("Save");
+        confirm.add_css_class("suggested-action");
+        let form = hbox(6);
+        margin(&form, 6);
+        form.append(&name);
+        form.append(&confirm);
+        let popover = gtk::Popover::builder().child(&form).build();
+        let save = gtk::MenuButton::builder()
+            .icon_name("list-add-symbolic")
+            .tooltip_text("Save these colors as a palette")
+            .popover(&popover)
+            .build();
+        save.update_property(&[gtk::accessible::Property::Label("Save palette")]);
+        let f = weak(self, |ui, text: glib::GString| ui.save_palette(text.trim()));
+        let closing = popover.downgrade();
+        let typed = name.downgrade();
+        let submit = Rc::new(move || {
+            let text = typed.upgrade().map(|e| e.text()).unwrap_or_default();
+            if let Some(popover) = closing.upgrade() {
+                popover.popdown();
+            }
+            f(text);
+        });
+        let go = submit.clone();
+        name.connect_activate(move |_| go());
+        confirm.connect_clicked(move |_| submit());
+        let remove = gtk::Button::builder()
+            .icon_name("edit-delete-symbolic")
+            .tooltip_text("Delete this saved palette")
+            .build();
+        remove.update_property(&[gtk::accessible::Property::Label("Delete palette")]);
+        let f = weak(self, |ui, ()| ui.delete_palette());
+        remove.connect_clicked(move |_| f(()));
+        let palette_line = hbox(6);
+        palette_line.append(&palette);
+        palette_line.append(&save);
+        palette_line.append(&remove);
+        target.append(&palette_line);
+        self.palette_row.replace(Some((palette, save, remove)));
+        self.sync_palette();
         let strip = gtk::DrawingArea::builder()
             .content_height(52)
             .hexpand(true)
@@ -1523,6 +1754,7 @@ impl Ui {
             let at = gtk::SpinButton::with_range(0., 100., 0.5);
             at.set_value(position * 100.);
             at.set_hexpand(true);
+            pass_scroll(&at);
             at.update_property(&[gtk::accessible::Property::Label(&format!(
                 "Stop {} position in percent",
                 index + 1
@@ -1629,7 +1861,17 @@ impl Ui {
         reverse.connect_clicked(move |_| f(()));
         controls.append(&reverse);
         target.append(&controls);
+        target.append(&kind);
+        target.append(&direction);
     }
+}
+fn same_stops(a: &[(f64, Color)], b: &[(f64, Color)]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(&(p, c), &(q, d))| {
+            [p - q, c.0 - d.0, c.1 - d.1, c.2 - d.2, c.3 - d.3]
+                .iter()
+                .all(|v| v.abs() < 1e-4)
+        })
 }
 const STOP_MARGIN: f64 = 16.;
 const STOP_HANDLE_Y: f64 = 38.;

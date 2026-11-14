@@ -6,7 +6,7 @@
 .editor-split > separator { background: alpha(currentColor, .11); min-width: 6px; }
 .editor-split > separator:hover { background: alpha(@accent_color, .38); }
 .framing expander title { padding: 4px 0; }
-.default-chip { padding: 1px 10px; min-height: 24px; font-size: .9em; }
+.default-bar { padding: 8px 13px; }
 .default-chip-on, .default-chip-on:disabled { background: alpha(@accent_bg_color, .18); color: @accent_color; opacity: 1; }
 .frame-preset { padding: 5px; font-size: .92em; font-weight: 500; }
 .frame-preset.selected-frame { box-shadow: inset 0 0 0 1px @accent_color; background: alpha(@accent_bg_color, .18); }

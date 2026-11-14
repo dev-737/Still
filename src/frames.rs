@@ -1,6 +1,6 @@
 use crate::{
     capture::{self, Result},
-    render::{Frame, Mode},
+    render::{Frame, Gradient, Mode},
     sharex,
 };
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,109 @@ fn library() -> PathBuf {
 fn default_path() -> PathBuf {
     root().join("default-frame.json")
 }
+fn style_path() -> PathBuf {
+    root().join("default-style.json")
+}
+fn palettes_path() -> PathBuf {
+    root().join("palettes.json")
+}
+
+type Rgba = (f64, f64, f64, f64);
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FrameStyle {
+    padding: [f64; 4],
+    adaptive_padding: bool,
+    extra_space: f64,
+    radius: f64,
+    outer_radius: f64,
+    shadow: f64,
+    shadow_offset: (f64, f64),
+    shadow_color: Rgba,
+    gradient: u8,
+    angle: f64,
+    stops: Vec<(f64, Rgba)>,
+}
+
+impl From<&Frame> for FrameStyle {
+    fn from(frame: &Frame) -> Self {
+        Self {
+            padding: frame.padding,
+            adaptive_padding: frame.adaptive_padding,
+            extra_space: frame.extra_space,
+            radius: frame.radius,
+            outer_radius: frame.outer_radius,
+            shadow: frame.shadow,
+            shadow_offset: frame.shadow_offset,
+            shadow_color: frame.shadow_color,
+            gradient: match frame.gradient {
+                Gradient::Linear => 0,
+                Gradient::Radial => 1,
+                Gradient::Conic => 2,
+            },
+            angle: frame.angle,
+            stops: frame.stops.clone(),
+        }
+    }
+}
+
+impl FrameStyle {
+    fn apply(&self, frame: &mut Frame) {
+        frame.padding = self.padding;
+        frame.adaptive_padding = self.adaptive_padding;
+        frame.extra_space = self.extra_space;
+        frame.radius = self.radius;
+        frame.outer_radius = self.outer_radius;
+        frame.shadow = self.shadow;
+        frame.shadow_offset = self.shadow_offset;
+        frame.shadow_color = self.shadow_color;
+        frame.gradient = match self.gradient {
+            1 => Gradient::Radial,
+            2 => Gradient::Conic,
+            _ => Gradient::Linear,
+        };
+        frame.angle = self.angle;
+        if self.stops.len() >= 2 {
+            frame.stops = self.stops.clone();
+        }
+    }
+}
+
+fn write_json(path: PathBuf, value: &impl Serialize) -> Result<()> {
+    let folder = root();
+    fs::create_dir_all(&folder)?;
+    let mut file = tempfile::NamedTempFile::new_in(&folder)?;
+    serde_json::to_writer(&mut file, value)?;
+    file.persist(path)?;
+    Ok(())
+}
+
+pub fn set_default_style(frame: &Frame) -> Result<()> {
+    if frame.mode == Mode::Original && frame.preset.is_none() {
+        return match fs::remove_file(style_path()) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err.into()),
+            _ => Ok(()),
+        };
+    }
+    write_json(style_path(), &FrameStyle::from(frame))
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Palette {
+    pub name: String,
+    pub stops: Vec<(f64, Rgba)>,
+}
+
+pub fn palettes() -> Vec<Palette> {
+    fs::read(palettes_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub fn set_palettes(all: &[Palette]) -> Result<()> {
+    write_json(palettes_path(), &all)
+}
 
 pub fn default_frame() -> Result<DefaultFrame> {
     match fs::read(default_path()) {
@@ -48,12 +151,7 @@ pub fn save_background(surface: &cairo::ImageSurface) -> Result<()> {
 }
 
 pub fn set_default(selection: &DefaultFrame) -> Result<()> {
-    let folder = root();
-    fs::create_dir_all(&folder)?;
-    let mut file = tempfile::NamedTempFile::new_in(&folder)?;
-    serde_json::to_writer(&mut file, selection)?;
-    file.persist(default_path())?;
-    Ok(())
+    write_json(default_path(), selection)
 }
 
 fn preset_path(id: &str) -> Result<PathBuf> {
@@ -69,30 +167,48 @@ fn preset_path(id: &str) -> Result<PathBuf> {
 }
 
 pub fn load(selection: &DefaultFrame) -> Result<Frame> {
-    let mode = match selection {
-        DefaultFrame::Original => Mode::Original,
-        DefaultFrame::Shadow => Mode::Shadow,
-        DefaultFrame::Gradient => Mode::Gradient,
+    Ok(match selection {
+        DefaultFrame::Original => Frame {
+            mode: Mode::Original,
+            ..Frame::default()
+        },
+        DefaultFrame::Shadow => Frame {
+            mode: Mode::Shadow,
+            ..Frame::default()
+        },
+        DefaultFrame::Gradient => Frame {
+            mode: Mode::Gradient,
+            ..Frame::default()
+        },
         DefaultFrame::Image => {
             let path = root().join("default-background.png");
             let mut file = fs::File::open(path)?;
             let background = cairo::ImageSurface::create_from_png(&mut file)?;
-            return Ok(Frame {
+            Frame {
                 mode: Mode::Image,
                 background: Some(background),
                 ..Frame::default()
-            });
+            }
         }
         DefaultFrame::Imported(id) => {
             let (mut frame, note) = sharex::load(&preset_path(id)?)?;
             frame.preset = Some((id.clone(), note));
-            return Ok(frame);
+            frame
         }
-    };
-    Ok(Frame {
-        mode,
-        ..Frame::default()
     })
+}
+
+pub fn load_default(selection: &DefaultFrame) -> Result<Frame> {
+    let mut frame = load(selection)?;
+    if *selection != DefaultFrame::Original {
+        let saved = fs::read(style_path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<FrameStyle>(&bytes).ok());
+        if let Some(style) = saved {
+            style.apply(&mut frame);
+        }
+    }
+    Ok(frame)
 }
 
 pub fn render_capture(raw: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -100,7 +216,7 @@ pub fn render_capture(raw: &[u8]) -> Result<Option<Vec<u8>>> {
     if selection == DefaultFrame::Original {
         return Ok(None);
     }
-    let frame = load(&selection)?;
+    let frame = load_default(&selection)?;
     let image = cairo::ImageSurface::create_from_png(&mut Cursor::new(raw))?;
     let mut edit = crate::render::Edit::new(&image);
     edit.frame = frame;
@@ -185,4 +301,35 @@ pub fn delete(id: &str) -> Result<()> {
     }
     fs::remove_file(path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_style_restores_a_customized_frame() {
+        let mut custom = Frame {
+            mode: Mode::Gradient,
+            ..Frame::default()
+        };
+        custom.padding = [48.; 4];
+        custom.radius = 20.;
+        custom.gradient = Gradient::Radial;
+        custom.angle = 215.;
+        custom.stops = vec![
+            (0., (0.1, 0.8, 0.3, 1.)),
+            (0.4, (0.2, 0.2, 0.9, 1.)),
+            (1., (0.9, 0.1, 0.5, 1.)),
+        ];
+        let json = serde_json::to_vec(&FrameStyle::from(&custom)).unwrap();
+        let style: FrameStyle = serde_json::from_slice(&json).unwrap();
+        let mut fresh = Frame {
+            mode: Mode::Gradient,
+            ..Frame::default()
+        };
+        assert_ne!(FrameStyle::from(&fresh), style);
+        style.apply(&mut fresh);
+        assert_eq!(FrameStyle::from(&fresh), FrameStyle::from(&custom));
+    }
 }
