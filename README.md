@@ -21,7 +21,7 @@ Import a ShareX image effect preset and Still applies it to your screenshots. Th
   </tr>
 </table>
 
-Open a `.sxie` package under **Framing → Import ShareX preset…**. Still keeps a local copy and shows it under **Custom frames**.
+Open a `.sxie` package under **Framing → Import ShareX preset…**. Still keeps a local copy and lists it in the **Custom frames** picker.
 
 ## Editor
 
@@ -30,9 +30,9 @@ Open a `.sxie` package under **Framing → Import ShareX preset…**. Still keep
 - **Annotate** with arrows, lines, freehand strokes, rectangles, ellipses, and text. Crop, blur, or cover private details with opaque redaction.
 - **Frame** with a transparent window shadow, a gradient, or an image backdrop. Adjust padding, image corners, outer corners, and shadow independently.
 - **Edit gradients** with a direction dial, exact angle, palettes, and up to five color stops. Choose linear, radial, or conic.
-- **Import ShareX frames and styles.** Open a `.sxie` package under **Framing → Import ShareX preset…**. Still saves a local copy and shows a thumbnail under **Custom frames**. Select, delete, or make an imported preset the default.
+- **Import ShareX frames and styles.** Open a `.sxie` package under **Framing → Import ShareX preset…**. Still saves a local copy and lists it in the searchable **Custom frames** picker, where each tile previews the preset on your own screenshot. Select, delete, or make an imported preset the default.
 
-ShareX import supports canvas padding and color, rounded corners, shadows, supported gradients, packaged PNG overlays, and simple text. Still reports unsupported effects and may approximate ShareX rendering. The bundled Background Gradient preset is from the [ShareX gallery](https://getsharex.com/image-effects).
+ShareX import supports every effect in the [ShareX gallery](https://getsharex.com/image-effects): Canvas, Crop, AutoCrop, RoundedCorners, Rotate, TornEdge, DrawBackground, DrawBorder, DrawCheckerboard, DrawImage, DrawParticles, DrawText, DrawTextEx, Shadow, Glow, Blur, Pixelate, Contrast, and SelectiveColor. Effects run in order, disabled ones are skipped, and an effect Still does not know is reported instead of silently dropped.
 
 ## Capture your way
 

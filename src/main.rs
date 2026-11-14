@@ -1,5 +1,7 @@
 mod capture;
+mod effects;
 mod frames;
+mod picker;
 mod render;
 mod sharex;
 mod ui;

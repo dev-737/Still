@@ -10,6 +10,16 @@
 .default-chip-on, .default-chip-on:disabled { background: alpha(@accent_bg_color, .18); color: @accent_color; opacity: 1; }
 .frame-preset { padding: 5px; font-size: .92em; font-weight: 500; }
 .frame-preset.selected-frame { box-shadow: inset 0 0 0 1px @accent_color; background: alpha(@accent_bg_color, .18); }
+.custom-frames-button { padding: 7px 10px; }
+.frame-grid { padding: 4px; background: transparent; }
+.frame-grid > child { padding: 3px; border-radius: 9px; }
+.frame-tile { padding: 6px; border-radius: 8px; }
+.frame-tile.selected-frame { box-shadow: inset 0 0 0 2px @accent_color; background: alpha(@accent_bg_color, .18); }
+.tile-preview { background: alpha(currentColor, .06); border-radius: 6px; }
+.tile-name { font-size: .9em; font-weight: 500; }
+.tile-delete { margin: 4px; opacity: 0; min-width: 22px; min-height: 22px; padding: 2px; }
+.frame-tile:hover .tile-delete, .tile-delete:focus-visible { opacity: 1; }
+.tile-default-badge { margin: 6px; color: @accent_color; }
 .frame-swatch { min-height: 30px; border-radius: 5px; }
 .original-swatch, .image-swatch { background: alpha(currentColor, .10); }
 .shadow-swatch { background: repeating-linear-gradient(135deg, alpha(currentColor, .15) 0px, alpha(currentColor, .15) 5px, alpha(currentColor, .06) 5px, alpha(currentColor, .06) 10px); }

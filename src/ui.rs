@@ -1,6 +1,7 @@
 use crate::frames::{self, DefaultFrame};
 use crate::{
     capture::{self, Result, Settings},
+    picker::{self, Actions, FramePicker},
     render::{self, Color, Edit, Frame, Gradient, Mark, Mode, Point, Rect, Tool},
 };
 use adw::prelude::*;
@@ -13,6 +14,8 @@ use std::{
     rc::Rc,
     sync::mpsc,
 };
+
+const FRAME_PREVIEW_SIDE: i32 = 336;
 
 const TOOLS: [(Tool, &str, &str, &str); 9] = [
     (Tool::Crop, "Crop", "C", "crop"),
@@ -60,8 +63,7 @@ struct Ui {
     options: gtk::Box,
     framing: gtk::Box,
     frame_controls: gtk::Box,
-    saved_frames: gtk::Box,
-    saved_buttons: RefCell<Vec<(DefaultFrame, gtk::Button)>>,
+    frame_picker: FramePicker,
     default_frame: RefCell<DefaultFrame>,
     default_style: RefCell<Option<frames::FrameStyle>>,
     default_button: gtk::Button,
@@ -141,6 +143,58 @@ fn clear(b: &gtk::Box) {
     while let Some(child) = b.first_child() {
         b.remove(&child);
     }
+}
+type SliderSpec = (&'static str, f64, f64, fn(&mut Frame, f64));
+
+fn slider_specs(frame: &Frame) -> Vec<SliderSpec> {
+    if frame.preset.is_some() {
+        return vec![
+            ("Outer space", frame.extra_space, 256., |f, v| {
+                f.extra_space = v
+            }),
+            ("Outer corners", frame.outer_radius, 512., |f, v| {
+                f.outer_radius = v
+            }),
+        ];
+    }
+    let padding_label = if frame.adaptive_padding {
+        "Max padding"
+    } else {
+        "Padding"
+    };
+    vec![
+        (
+            padding_label,
+            frame.padding.iter().sum::<f64>() / 4.,
+            512.,
+            |f, v| f.padding = [v; 4],
+        ),
+        ("Image corners", frame.radius, 512., |f, v| f.radius = v),
+        ("Outer corners", frame.outer_radius, 512., |f, v| {
+            f.outer_radius = v
+        }),
+        ("Shadow", frame.shadow, 128., |f, v| {
+            f.shadow = v;
+            f.shadow_offset = (0., v / 2.);
+        }),
+    ]
+}
+
+fn connect_frame_picker(ui: &Rc<Ui>) {
+    let choose = weak(ui, |ui, id: String| ui.choose_frame(&id));
+    let delete = weak(ui, |ui, id: String| {
+        let name = frames::entries()
+            .ok()
+            .and_then(|entries| entries.into_iter().find(|(entry, _)| entry == &id))
+            .map_or_else(|| id.clone(), |(_, name)| name);
+        ui.confirm_delete(&id, &name);
+    });
+    let owner = Rc::downgrade(ui);
+    ui.frame_picker.set_actions(Actions {
+        choose: Box::new(move |id| choose(id.to_owned())),
+        delete: Box::new(move |id| delete(id.to_owned())),
+        preview: Box::new(move |id| owner.upgrade()?.preview_texture(id)),
+    });
 }
 fn weak<T>(ui: &Rc<Ui>, f: impl Fn(&Rc<Ui>, T) + 'static) -> impl Fn(T) + 'static {
     let weak = Rc::downgrade(ui);
@@ -507,8 +561,8 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         frame_buttons.push((b, mode));
     }
     framing.append(&modes);
-    let saved_frames = vbox(7);
-    framing.append(&saved_frames);
+    let frame_picker = FramePicker::new();
+    framing.append(frame_picker.widget());
     let frame_controls = vbox(12);
     framing.append(&frame_controls);
     let inspector = gtk::ScrolledWindow::builder()
@@ -593,8 +647,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         options,
         framing,
         frame_controls,
-        saved_frames,
-        saved_buttons: RefCell::new(Vec::new()),
+        frame_picker,
         default_frame: RefCell::new(frames::default_frame().unwrap_or_default()),
         default_style: RefCell::new(None),
         default_button,
@@ -643,10 +696,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
                 .is_some_and(|d| d.edit.frame.mode == mode && d.edit.frame.preset.is_none());
             if !selected {
                 ui.change_frame(|frame| {
-                    if frame.preset.is_some()
-                        || !frame.overlays.is_empty()
-                        || frame.canvas_color.is_some()
-                    {
+                    if frame.pipeline.is_some() {
                         *frame = Frame::default();
                     }
                     frame.mode = mode;
@@ -655,7 +705,8 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         });
         button.connect_clicked(move |_| f(()));
     }
-    ui.rebuild_saved_frames();
+    connect_frame_picker(&ui);
+    ui.reload_frames();
     action(&ui, app, "frame-default", &[], |ui| ui.save_default());
     let refresh_export = weak(&ui, |ui, ()| ui.refresh());
     ui.export_scale
@@ -764,7 +815,9 @@ impl Ui {
         let same_frame = selected.as_ref() == Some(&*self.default_frame.borrow());
         let is_default = same_frame
             && (selected == Some(DefaultFrame::Original)
-                || doc.as_ref().map(|d| frames::FrameStyle::from(&d.edit.frame))
+                || doc
+                    .as_ref()
+                    .map(|d| frames::FrameStyle::from(&d.edit.frame))
                     == *self.default_style.borrow());
         self.default_button.set_sensitive(
             selected.is_some() && (!is_default || selected == Some(DefaultFrame::Image)),
@@ -787,20 +840,10 @@ impl Ui {
                 (true, _) => "This frame and its settings are used for new screenshots",
                 _ => "Use this frame and its settings for new screenshots",
             }));
-        for (selection, button) in self.saved_buttons.borrow().iter() {
-            if selected.as_ref() == Some(selection) {
-                button.add_css_class("selected-frame");
-            } else {
-                button.remove_css_class("selected-frame");
-            }
-            button.update_property(&[gtk::accessible::Property::Description(
-                if selection == &*self.default_frame.borrow() {
-                    "Default frame"
-                } else {
-                    ""
-                },
-            )]);
-        }
+        self.frame_picker.show_state(
+            selected.as_ref().and_then(DefaultFrame::imported_id),
+            self.default_frame.borrow().imported_id(),
+        );
         if doc.is_none() {
             self.status.set_label("No image");
         }
@@ -1021,77 +1064,25 @@ impl Ui {
         );
         dialog.open(Some(&self.window), gio::Cancellable::NONE, f);
     }
-    fn rebuild_saved_frames(self: &Rc<Self>) {
-        self.saved_buttons.borrow_mut().clear();
-        clear(&self.saved_frames);
-        let ids = match frames::list() {
-            Ok(ids) => ids,
-            Err(error) => {
-                self.message(&error.to_string());
-                return;
-            }
-        };
-        if ids.is_empty() {
-            return;
+    fn reload_frames(&self) {
+        match frames::entries() {
+            Ok(entries) => self.frame_picker.reload(entries),
+            Err(error) => self.message(&error.to_string()),
         }
-        self.saved_frames.append(&heading("Custom frames"));
-        let sample = ImageSurface::create_from_png(&mut Cursor::new(include_bytes!(
-            "../assets/frame-sample.png"
-        )));
-        for id in ids {
-            let selection = DefaultFrame::Imported(id.clone());
-            let Ok(frame) = frames::load(&selection) else {
-                continue;
-            };
-            let note = &frame.preset.as_ref().unwrap().1;
-            let name = note.split(" · ").next().unwrap_or(note);
-            let tile = vbox(6);
-            if let Ok(image) = &sample {
-                let mut edit = Edit::new(image);
-                edit.frame = frame.clone();
-                if let Ok(bytes) = render::png(image, &edit) {
-                    if let Ok(pixbuf) = gtk::gdk_pixbuf::Pixbuf::from_read(Cursor::new(bytes)) {
-                        let texture = gdk::Texture::for_pixbuf(&pixbuf);
-                        let picture = gtk::Picture::for_paintable(&texture);
-                        picture.set_content_fit(gtk::ContentFit::Contain);
-                        picture.set_size_request(100, 64);
-                        picture.set_can_shrink(true);
-                        tile.append(&picture);
-                    }
-                }
-            }
-            let label = gtk::Label::new(Some(name));
-            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            tile.append(&label);
-            let select = gtk::Button::builder()
-                .child(&tile)
-                .hexpand(true)
-                .tooltip_text(note)
-                .build();
-            select.add_css_class("frame-preset");
-            select.update_property(&[gtk::accessible::Property::Label(name)]);
-            let remove = gtk::Button::builder()
-                .icon_name("edit-delete-symbolic")
-                .valign(gtk::Align::Center)
-                .tooltip_text(format!("Delete {name}"))
-                .build();
-            remove.update_property(&[gtk::accessible::Property::Label(&format!("Delete {name}"))]);
-            let row = hbox(5);
-            row.append(&select);
-            row.append(&remove);
-            self.saved_frames.append(&row);
-            self.saved_buttons
-                .borrow_mut()
-                .push((selection.clone(), select.clone()));
-            let apply = weak(self, move |ui, ()| match frames::load(&selection) {
-                Ok(frame) => ui.change_frame(|current| *current = frame),
-                Err(err) => ui.message(&err.to_string()),
-            });
-            select.connect_clicked(move |_| apply(()));
-            let name = name.to_owned();
-            let delete = weak(self, move |ui, ()| ui.confirm_delete(&id, &name));
-            remove.connect_clicked(move |_| delete(()));
+    }
+    fn choose_frame(self: &Rc<Self>, id: &str) {
+        match frames::load(&DefaultFrame::Imported(id.to_owned())) {
+            Ok(frame) => self.change_frame(|current| *current = frame),
+            Err(error) => self.message(&error.to_string()),
         }
+    }
+    fn preview_texture(&self, id: &str) -> Option<gdk::Texture> {
+        let frame = frames::load(&DefaultFrame::Imported(id.to_owned())).ok()?;
+        let document = self.doc.borrow();
+        let document = document.as_ref()?;
+        let edit = document.edit.with_frame(frame);
+        let surface = render::thumbnail(&document.image, &edit, FRAME_PREVIEW_SIDE).ok()?;
+        picker::texture(surface)
     }
     fn confirm_delete(self: &Rc<Self>, id: &str, name: &str) {
         let dialog = adw::MessageDialog::new(
@@ -1124,7 +1115,7 @@ impl Ui {
                 }
                 ui.default_frame
                     .replace(frames::default_frame().unwrap_or_default());
-                ui.rebuild_saved_frames();
+                ui.reload_frames();
                 ui.rebuild_frame();
                 ui.refresh();
                 ui.message("Custom frame deleted.");
@@ -1165,7 +1156,7 @@ impl Ui {
         match result {
             Ok(frame) => {
                 let note = frame.preset.as_ref().unwrap().1.clone();
-                self.rebuild_saved_frames();
+                self.reload_frames();
                 self.change_frame(|current| *current = frame);
                 self.message(&note);
             }
@@ -1362,43 +1353,13 @@ impl Ui {
             .column_spacing(8)
             .row_spacing(6)
             .build();
-        for (index, (label, value, max, update)) in [
-            if frame.preset.is_some() {
-                (
-                    "Outer space",
-                    frame.extra_space,
-                    256.,
-                    (|f: &mut Frame, v| f.extra_space = v) as fn(&mut Frame, f64),
-                )
-            } else {
-                (
-                    if frame.adaptive_padding {
-                        "Max padding"
-                    } else {
-                        "Padding"
-                    },
-                    frame.padding.iter().sum::<f64>() / 4.,
-                    512.,
-                    (|f: &mut Frame, v| f.padding = [v; 4]) as fn(&mut Frame, f64),
-                )
-            },
-            ("Image corners", frame.radius, 512., |f, v| f.radius = v),
-            ("Outer corners", frame.outer_radius, 512., |f, v| {
-                f.outer_radius = v
-            }),
-            ("Shadow", frame.shadow, 128., |f, v| {
-                f.shadow = v;
-                f.shadow_offset = (0., v / 2.);
-            }),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (index, (label, value, max, update)) in slider_specs(&frame).into_iter().enumerate() {
             self.slider(&sliders, index as i32, label, value, max, update);
         }
         self.frame_controls.append(&sliders);
         if frame.mode == Mode::Gradient {
             let body = vbox(9);
+            body.set_margin_top(8);
             self.gradient_controls(&frame, &body);
             let expander = gtk::Expander::builder()
                 .label_widget(&heading("Gradient"))

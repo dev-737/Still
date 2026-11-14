@@ -1,6 +1,9 @@
-use crate::capture::Result;
+use crate::{
+    capture::Result,
+    effects::{Bitmap, Effect, Pipeline, rounded_rect},
+};
 use cairo::{Context, Format, ImageSurface, LinearGradient, RadialGradient};
-use std::f64::consts::{PI, TAU};
+use std::{cell::RefCell, f64::consts::TAU, rc::Rc};
 
 pub type Color = (f64, f64, f64, f64);
 pub type Point = (f64, f64);
@@ -16,7 +19,7 @@ pub enum Tool {
     Blur,
     Redact,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
@@ -55,130 +58,6 @@ pub enum Gradient {
     Conic,
 }
 #[derive(Clone)]
-pub struct Overlay {
-    pub right: bool,
-    pub bottom: bool,
-    pub offset: Point,
-    pub canvas_inset: [f64; 4],
-    pub content: OverlayContent,
-}
-#[derive(Clone)]
-pub enum OverlayContent {
-    Image {
-        surface: ImageSurface,
-        size: Point,
-        opacity: f64,
-        flip: (bool, bool),
-        nearest: bool,
-    },
-    Circle {
-        diameter: f64,
-        color: Color,
-        outline: Option<(f64, Color)>,
-    },
-    Border {
-        width: f64,
-        color: Color,
-    },
-    Text {
-        text: String,
-        font: String,
-        points: f64,
-        color: Color,
-        padding: [f64; 4],
-    },
-}
-impl Overlay {
-    fn position(&self, w: f64, h: f64, width: f64, height: f64) -> Point {
-        let (x, y) = self.offset;
-        (
-            if self.right { w - width - x } else { x },
-            if self.bottom { h - height - y } else { y },
-        )
-    }
-    fn paint(&self, c: &Context, w: f64, h: f64) -> Result<()> {
-        match &self.content {
-            OverlayContent::Image {
-                surface,
-                size: (width, height),
-                opacity,
-                flip,
-                nearest,
-            } => {
-                let (x, y) = self.position(w, h, *width, *height);
-                c.save()?;
-                c.translate(x, y);
-                c.rectangle(0., 0., *width, *height);
-                c.clip();
-                c.scale(
-                    width / f64::from(surface.width()),
-                    height / f64::from(surface.height()),
-                );
-                let sw = f64::from(surface.width());
-                let sh = f64::from(surface.height());
-                c.translate(if flip.0 { sw } else { 0. }, if flip.1 { sh } else { 0. });
-                c.scale(if flip.0 { -1. } else { 1. }, if flip.1 { -1. } else { 1. });
-                c.set_source_surface(surface, 0., 0.)?;
-                c.source().set_filter(if *nearest {
-                    cairo::Filter::Nearest
-                } else {
-                    cairo::Filter::Best
-                });
-                c.paint_with_alpha(*opacity)?;
-                c.restore()?;
-            }
-            OverlayContent::Circle {
-                diameter,
-                color,
-                outline,
-            } => {
-                let (x, y) = self.position(w, h, *diameter, *diameter);
-                let radius = diameter / 2.;
-                c.new_path();
-                c.arc(x + radius, y + radius, radius, 0., TAU);
-                source(c, *color);
-                if let Some((width, stroke)) = outline {
-                    c.fill_preserve()?;
-                    source(c, *stroke);
-                    c.set_line_width(*width);
-                    c.stroke()?;
-                } else {
-                    c.fill()?;
-                }
-            }
-            OverlayContent::Border { width, color } => {
-                let width = width.min(w / 2.).min(h / 2.);
-                c.new_path();
-                c.rectangle(width / 2., width / 2., w - width, h - width);
-                c.set_line_width(width);
-                source(c, *color);
-                c.stroke()?;
-            }
-            OverlayContent::Text {
-                text,
-                font,
-                points,
-                color,
-                padding: [l, t, r, b],
-            } => {
-                let layout = pangocairo::functions::create_layout(c);
-                let mut description = gtk::pango::FontDescription::from_string(font);
-                description.set_absolute_size(points * 96. / 72. * gtk::pango::SCALE as f64);
-                layout.set_font_description(Some(&description));
-                layout.set_text(text);
-                let (width, height) = layout.pixel_size();
-                let (x, y) =
-                    self.position(w, h, f64::from(width) + l + r, f64::from(height) + t + b);
-                source(c, *color);
-                c.move_to(x + l, y + t);
-                pangocairo::functions::show_layout(c, &layout);
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
 pub struct Frame {
     pub mode: Mode,
     pub padding: [f64; 4],
@@ -194,10 +73,7 @@ pub struct Frame {
     pub angle: f64,
     pub stops: Vec<(f64, Color)>,
     pub background: Option<ImageSurface>,
-    pub canvas_color: Option<Color>,
-    pub canvas_radius: Option<f64>,
-    pub canvas_rim: Option<(Color, f64)>,
-    pub overlays: Vec<Overlay>,
+    pub pipeline: Option<Pipeline>,
 }
 impl Default for Frame {
     fn default() -> Self {
@@ -216,18 +92,33 @@ impl Default for Frame {
             angle: 135.,
             stops: vec![(0., (0.28, 0.87, 0.60, 1.)), (1., (0.25, 0.47, 0.86, 1.))],
             background: None,
-            canvas_color: None,
-            canvas_radius: None,
-            canvas_rim: None,
-            overlays: vec![],
+            pipeline: None,
         }
     }
 }
+
+impl Frame {
+    pub fn from_pipeline(pipeline: Pipeline) -> Self {
+        Self {
+            mode: Mode::Shadow,
+            pipeline: Some(pipeline),
+            ..Self::default()
+        }
+    }
+}
+struct Memo {
+    crop: Rect,
+    pipeline: Pipeline,
+    bitmap: Bitmap,
+}
+
 #[derive(Clone)]
 pub struct Edit {
     pub crop: Rect,
     pub marks: Vec<Mark>,
     pub frame: Frame,
+    source: ImageSurface,
+    memo: Rc<RefCell<Option<Memo>>>,
 }
 impl Edit {
     pub fn new(image: &ImageSurface) -> Self {
@@ -240,6 +131,15 @@ impl Edit {
             },
             marks: vec![],
             frame: Frame::default(),
+            source: image.clone(),
+            memo: Rc::default(),
+        }
+    }
+    pub fn with_frame(&self, frame: Frame) -> Self {
+        Self {
+            frame,
+            memo: Rc::default(),
+            ..self.clone()
         }
     }
     fn frame_scale(&self) -> f64 {
@@ -249,21 +149,63 @@ impl Edit {
             1.
         }
     }
+    fn rendered(&self) -> Option<Bitmap> {
+        let pipeline = self.frame.pipeline.as_ref()?;
+        let mut memo = self.memo.borrow_mut();
+        if let Some(known) = memo.as_ref() {
+            if known.crop == self.crop && known.pipeline.same(pipeline) {
+                return Some(known.bitmap.clone());
+            }
+        }
+        let bitmap = self.run(pipeline);
+        *memo = Some(Memo {
+            crop: self.crop,
+            pipeline: pipeline.clone(),
+            bitmap: bitmap.clone(),
+        });
+        Some(bitmap)
+    }
+    fn run(&self, pipeline: &Pipeline) -> Bitmap {
+        let (source_w, source_h) = (self.source.width(), self.source.height());
+        let left = (self.crop.x.floor() as i32).clamp(0, source_w - 1);
+        let top = (self.crop.y.floor() as i32).clamp(0, source_h - 1);
+        let right = ((self.crop.x + self.crop.w).ceil() as i32).clamp(left + 1, source_w);
+        let bottom = ((self.crop.y + self.crop.h).ceil() as i32).clamp(top + 1, source_h);
+        let whole = Bitmap::new(self.source.clone());
+        let input = if (left, top, right, bottom) == (0, 0, source_w, source_h) {
+            Ok(whole.clone())
+        } else {
+            whole.cropped(left, top, right - left, bottom - top)
+        };
+        input
+            .map(|input| {
+                pipeline.apply(input.clone()).unwrap_or_else(|error| {
+                    eprintln!("The frame preset failed: {error}");
+                    input
+                })
+            })
+            .unwrap_or(whole)
+    }
     pub fn geometry(&self) -> (f64, f64, i32, i32) {
+        let extra = self.extra_space();
+        if let Some(bitmap) = self.rendered() {
+            let (w, h) = bitmap.size();
+            return (
+                bitmap.origin.0 + extra,
+                bitmap.origin.1 + extra,
+                w + 2 * extra as i32,
+                h + 2 * extra as i32,
+            );
+        }
         let f = &self.frame;
         let scale = self.frame_scale();
         let padding = f.padding.map(|p| (p * scale).round());
-        let extra = self.extra_space();
         let [l, t, r, b] = match f.mode {
             Mode::Original => [0.; 4],
-            Mode::Shadow if f.shadow > 0. => padding.map(|p| {
+            Mode::Shadow if f.shadow > 0. => {
                 let space = (shadow_space(f) * scale).ceil();
-                if f.canvas_color.is_some() {
-                    p + space
-                } else {
-                    p.max(space)
-                }
-            }),
+                padding.map(|p| p.max(space))
+            }
             _ => padding,
         }
         .map(|p| p + extra);
@@ -281,6 +223,13 @@ impl Edit {
             self.frame.extra_space.round().max(0.)
         }
     }
+    fn corner_radius(&self) -> f64 {
+        if self.frame.mode == Mode::Original || self.frame.pipeline.is_some() {
+            0.
+        } else {
+            self.frame.radius
+        }
+    }
 }
 
 fn shadow_space(f: &Frame) -> f64 {
@@ -290,17 +239,7 @@ fn source(c: &Context, (r, g, b, a): Color) {
     c.set_source_rgba(r, g, b, a);
 }
 fn round(c: &Context, r: Rect, radius: f64) {
-    let d = radius.min(r.w / 2.).min(r.h / 2.).max(0.);
-    c.new_path();
-    if d == 0. {
-        c.rectangle(r.x, r.y, r.w, r.h);
-        return;
-    }
-    c.arc(r.x + r.w - d, r.y + d, d, -PI / 2., 0.);
-    c.arc(r.x + r.w - d, r.y + r.h - d, d, 0., PI / 2.);
-    c.arc(r.x + d, r.y + r.h - d, d, PI / 2., PI);
-    c.arc(r.x + d, r.y + d, d, PI, PI * 1.5);
-    c.close_path();
+    rounded_rect(c, r.x, r.y, r.w, r.h, radius);
 }
 
 fn background(c: &Context, f: &Frame, w: f64, h: f64) -> Result<()> {
@@ -381,114 +320,81 @@ fn background(c: &Context, f: &Frame, w: f64, h: f64) -> Result<()> {
 
 pub fn paint(c: &Context, image: &ImageSurface, edit: &Edit, draft: Option<&Mark>) -> Result<()> {
     let (x, y, w, h) = edit.geometry();
-    let f = &edit.frame;
-    let bounds = Rect {
-        x,
-        y,
-        w: edit.crop.w,
-        h: edit.crop.h,
-    };
+    let radius = edit.corner_radius();
     c.save()?;
-    clip_outer(c, f, w, h);
-    let inset = if f.mode == Mode::Shadow && f.shadow > 0. && f.canvas_color.is_some() {
-        (shadow_space(f) * edit.frame_scale()).ceil()
+    clip_outer(c, &edit.frame, w, h);
+    if let Some(bitmap) = edit.rendered() {
+        let space = edit.extra_space();
+        bitmap.paint(c, space, space)?;
     } else {
-        0.
-    } + edit.extra_space();
-    let canvas = Rect {
-        x: inset,
-        y: inset,
-        w: f64::from(w) - 2. * inset,
-        h: f64::from(h) - 2. * inset,
-    };
-    let shadow_bounds = if f.canvas_color.is_some() {
-        canvas
-    } else {
-        bounds
-    };
-    background(c, f, w as f64, h as f64)?;
-    let radius = if f.mode == Mode::Original {
-        0.
-    } else {
-        f.radius
-    };
+        paint_built_in(c, image, edit, (x, y, w, h), radius)?;
+    }
+    paint_marks(c, image, edit, draft, (x, y), radius)?;
+    c.restore()?;
+    Ok(())
+}
+
+fn paint_built_in(
+    c: &Context,
+    image: &ImageSurface,
+    edit: &Edit,
+    (x, y, w, h): (f64, f64, i32, i32),
+    radius: f64,
+) -> Result<()> {
+    let f = &edit.frame;
+    background(c, f, f64::from(w), f64::from(h))?;
     if f.mode != Mode::Original && f.shadow > 0. {
         let (r, g, b, a) = f.shadow_color;
+        let scale = edit.frame_scale();
         for step in (1..=28).rev() {
-            let scale = edit.frame_scale();
             let d = f.shadow * scale * 1.65 * step as f64 / 28.;
             round(
                 c,
                 Rect {
-                    x: shadow_bounds.x + f.shadow_offset.0 * scale - d,
-                    y: shadow_bounds.y + f.shadow_offset.1 * scale - d,
-                    w: shadow_bounds.w + 2. * d,
-                    h: shadow_bounds.h + 2. * d,
+                    x: x + f.shadow_offset.0 * scale - d,
+                    y: y + f.shadow_offset.1 * scale - d,
+                    w: edit.crop.w + 2. * d,
+                    h: edit.crop.h + 2. * d,
                 },
-                f.canvas_radius.unwrap_or(radius) + d,
+                radius + d,
             );
             source(c, (r, g, b, a * (1. - step as f64 / 29.) / 14.));
             c.fill()?;
         }
     }
     c.save()?;
-    if f.mode != Mode::Original {
-        if let Some(color) = f.canvas_color {
-            round(c, canvas, f.canvas_radius.unwrap_or(0.));
-            c.clip();
-            source(c, f.canvas_rim.map_or(color, |(rim, _)| rim));
-            c.paint()?;
-            let rim = f.canvas_rim.map_or(0., |(_, size)| size);
-            let inner = Rect {
-                x: canvas.x + rim,
-                y: canvas.y + rim,
-                w: (canvas.w - 2. * rim).max(0.),
-                h: (canvas.h - 2. * rim).max(0.),
-            };
-            round(c, inner, f.canvas_radius.unwrap_or(0.));
-            source(c, color);
-            c.fill()?;
-        }
-    }
-    c.save()?;
     c.translate(x - edit.crop.x, y - edit.crop.y);
-    let pixels = edit.crop;
-    within_image(c, pixels, radius, |c| {
+    within_image(c, edit.crop, radius, |c| {
         c.set_source_surface(image, 0., 0.)?;
         c.paint()?;
         Ok(())
     })?;
-    for mark in edit
-        .marks
-        .iter()
-        .chain(draft)
-        .filter(|mark| mark.tool != Tool::Redact)
-    {
+    c.restore()?;
+    Ok(())
+}
+
+fn paint_marks(
+    c: &Context,
+    image: &ImageSurface,
+    edit: &Edit,
+    draft: Option<&Mark>,
+    (x, y): Point,
+    radius: f64,
+) -> Result<()> {
+    let pixels = edit.crop;
+    c.save()?;
+    c.translate(x - pixels.x, y - pixels.y);
+    let marks = || edit.marks.iter().chain(draft);
+    for mark in marks().filter(|mark| mark.tool != Tool::Redact) {
         if is_free(mark.tool) {
             draw(c, image, mark)?;
         } else {
             within_image(c, pixels, radius, |c| draw(c, image, mark))?;
         }
     }
-    for mark in edit
-        .marks
-        .iter()
-        .chain(draft)
-        .filter(|mark| mark.tool == Tool::Redact)
-    {
+    for mark in marks().filter(|mark| mark.tool == Tool::Redact) {
         within_image(c, pixels, radius, |c| draw(c, image, mark))?;
     }
-    c.restore()?;
-    if f.mode != Mode::Original {
-        for overlay in &f.overlays {
-            let [l, t, r, b] = overlay.canvas_inset;
-            c.save()?;
-            c.translate(canvas.x + l, canvas.y + t);
-            overlay.paint(c, canvas.w - l - r, canvas.h - t - b)?;
-            c.restore()?;
-        }
-    }
-    c.restore()?;
     c.restore()?;
     Ok(())
 }
@@ -511,11 +417,7 @@ fn clip_outer(c: &Context, frame: &Frame, w: i32, h: i32) {
 
 pub fn paint_draft(c: &Context, image: &ImageSurface, edit: &Edit, draft: &Mark) -> Result<()> {
     let (x, y, w, h) = edit.geometry();
-    let radius = if edit.frame.mode == Mode::Original {
-        0.
-    } else {
-        edit.frame.radius
-    };
+    let radius = edit.corner_radius();
     c.save()?;
     clip_outer(c, &edit.frame, w, h);
     c.translate(x - edit.crop.x, y - edit.crop.y);
@@ -653,6 +555,17 @@ fn draw(c: &Context, image: &ImageSurface, m: &Mark) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn thumbnail(image: &ImageSurface, edit: &Edit, longest_side: i32) -> Result<ImageSurface> {
+    let (_, _, width, height) = edit.geometry();
+    let scale = f64::from(longest_side) / f64::from(width.max(height));
+    let scaled = |side: i32| ((f64::from(side) * scale).round() as i32).max(1);
+    let result = ImageSurface::create(Format::ARgb32, scaled(width), scaled(height))?;
+    let c = Context::new(&result)?;
+    c.scale(scale, scale);
+    paint(&c, image, edit, None)?;
+    Ok(result)
 }
 
 pub fn png(image: &ImageSurface, edit: &Edit) -> Result<Vec<u8>> {

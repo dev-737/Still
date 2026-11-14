@@ -191,8 +191,9 @@ pub fn load(selection: &DefaultFrame) -> Result<Frame> {
             }
         }
         DefaultFrame::Imported(id) => {
-            let (mut frame, note) = sharex::load(&preset_path(id)?)?;
-            frame.preset = Some((id.clone(), note));
+            let preset = sharex::load(&preset_path(id)?)?;
+            let mut frame = Frame::from_pipeline(preset.pipeline.clone());
+            frame.preset = Some((id.clone(), preset.note()));
             frame
         }
     })
@@ -221,6 +222,15 @@ pub fn render_capture(raw: &[u8]) -> Result<Option<Vec<u8>>> {
     let mut edit = crate::render::Edit::new(&image);
     edit.frame = frame;
     Ok(Some(crate::render::png(&image, &edit)?))
+}
+
+impl DefaultFrame {
+    pub fn imported_id(&self) -> Option<&str> {
+        match self {
+            Self::Imported(id) => Some(id),
+            _ => None,
+        }
+    }
 }
 
 pub fn selection(frame: &Frame) -> DefaultFrame {
@@ -257,6 +267,20 @@ pub fn list() -> Result<Vec<String>> {
     Ok(ids)
 }
 
+pub fn entries() -> Result<Vec<(String, String)>> {
+    let mut entries = list()?
+        .into_iter()
+        .map(|id| {
+            let name = preset_path(&id)
+                .and_then(|path| sharex::name(&path))
+                .unwrap_or_else(|_| id.clone());
+            (id, name)
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(_, name)| name.to_lowercase());
+    Ok(entries)
+}
+
 pub fn import(path: &Path) -> Result<Frame> {
     let mut bytes = Vec::new();
     fs::File::open(path)?
@@ -269,7 +293,9 @@ pub fn import(path: &Path) -> Result<Frame> {
 }
 
 pub fn save_preset(bytes: &[u8]) -> Result<Frame> {
-    let (mut frame, note) = sharex::read(Cursor::new(bytes))?;
+    let preset = sharex::read(Cursor::new(bytes))?;
+    let note = preset.note();
+    let mut frame = Frame::from_pipeline(preset.pipeline);
     for id in list()? {
         if fs::metadata(preset_path(&id)?)
             .is_ok_and(|metadata| metadata.len() == bytes.len() as u64)
