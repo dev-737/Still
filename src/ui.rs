@@ -1397,13 +1397,14 @@ impl Ui {
         scale.set_hexpand(true);
         pass_scroll(&scale);
         grid.attach(&scale, 1, row, 1, 1);
-        let number = gtk::Label::new(Some(&format!("{value:.0}")));
-        number.add_css_class("dim-label");
+        let number = gtk::SpinButton::new(Some(&scale.adjustment()), 1., 0);
+        number.add_css_class("slider-number");
         number.set_width_chars(3);
-        number.set_xalign(1.);
+        number.set_numeric(true);
+        number.update_property(&[gtk::accessible::Property::Label(label)]);
+        pass_scroll(&number);
         grid.attach(&number, 2, row, 1, 1);
         let f = weak(self, move |ui, value| {
-            number.set_label(&format!("{value:.0}"));
             ui.live_frame(|frame| update(frame, value));
         });
         scale.connect_value_changed(move |scale| f(scale.value()));
@@ -1416,6 +1417,10 @@ impl Ui {
         let done = weak(self, |ui, ()| ui.frame_editing.set(false));
         clicks.connect_pressed(move |_, _, _, _| done(()));
         scale.add_controller(clicks);
+        let typing_done = gtk::EventControllerFocus::new();
+        let done = weak(self, |ui, ()| ui.frame_editing.set(false));
+        typing_done.connect_leave(move |_| done(()));
+        number.add_controller(typing_done);
     }
     fn gradient_controls(self: &Rc<Self>, frame: &Frame, target: &gtk::Box) {
         let dropdown = gtk::DropDown::from_strings(&["Linear", "Radial", "Conic"]);
