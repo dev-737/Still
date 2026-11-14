@@ -21,7 +21,7 @@ impl WindowStyle {
     pub fn label(self) -> &'static str {
         match self {
             WindowStyle::Standard => "Standard",
-            WindowStyle::Compact => "Compact floating",
+            WindowStyle::Compact => "Compact",
         }
     }
 

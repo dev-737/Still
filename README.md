@@ -8,24 +8,28 @@ Capture a region, paste it straight away, or click its preview to open the edito
 
 ## ShareX frames
 
-Import a ShareX image effect preset and Still applies it to your screenshots. The same capture is shown below, unframed and through three `.sxie` packages.
+Import a ShareX image effect preset and Still applies it to your screenshots. The same capture is shown below, unframed and through five `.sxie` packages.
 
 <table>
   <tr>
-    <td align="center"><img src="docs/images/sharex-Original.webp" alt="Unframed capture" width="420"><br><sub>Original</sub></td>
-    <td align="center"><img src="docs/images/sharex-BackgroundGradient.webp" alt="Capture with the ShareX Background Gradient preset" width="420"><br><sub>Background Gradient</sub></td>
+    <td align="center"><img src="docs/images/sharex-Original.webp" alt="Unframed capture" width="280"><br><sub>Original</sub></td>
+    <td align="center"><img src="docs/images/sharex-macOSBigSur.webp" alt="Capture with the ShareX macOS Big Sur preset" width="280"><br><sub>macOS Big Sur</sub></td>
+    <td align="center"><img src="docs/images/sharex-Polaroid.webp" alt="Capture with the ShareX Polaroid preset" width="280"><br><sub>Polaroid</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/images/sharex-macOSBigSur.webp" alt="Capture with the ShareX macOS Big Sur preset" width="420"><br><sub>macOS Big Sur</sub></td>
-    <td align="center"><img src="docs/images/sharex-Windows11Taskbar.webp" alt="Capture with the ShareX Windows 11 Taskbar preset" width="420"><br><sub>Windows 11 Taskbar</sub></td>
+    <td align="center"><img src="docs/images/sharex-NeonRainbowGlow.webp" alt="Capture with the ShareX Neon Rainbow Glow preset" width="280"><br><sub>Neon Rainbow Glow</sub></td>
+    <td align="center"><img src="docs/images/sharex-SunsetGlow.webp" alt="Capture with the ShareX Sunset Glow preset" width="280"><br><sub>Sunset Glow</sub></td>
+    <td align="center"><img src="docs/images/sharex-GoldBorder.webp" alt="Capture with the ShareX Gold Border preset" width="280"><br><sub>Gold Border</sub></td>
   </tr>
 </table>
 
 Open a `.sxie` package under **Framing → Import ShareX preset…**. Still keeps a local copy and lists it in the **Custom frames** picker.
 
+<img src="docs/images/picker.webp" alt="Still's Custom frames picker open over a dashboard screenshot, searchable and showing each imported preset applied to the same capture" width="850">
+
 ## Editor
 
-<img src="docs/images/editor.webp" alt="Still in dark mode, showing a screenshot on a gradient frame with arrow, rectangle, and text annotations, plus the framing and gradient controls" width="850">
+<img src="docs/images/editor.webp" alt="Still in dark mode, showing a code screenshot on a gradient frame with rectangle, arrow, and text annotations, plus the framing controls" width="850">
 
 - **Annotate** with arrows, lines, freehand strokes, rectangles, ellipses, and text. Crop, blur, or cover private details with opaque redaction.
 - **Frame** with a transparent window shadow, a gradient, or an image backdrop. Adjust padding, image corners, outer corners, and shadow independently.
@@ -36,11 +40,11 @@ ShareX import supports every effect in the [ShareX gallery](https://getsharex.co
 
 ## Capture your way
 
-<img src="docs/images/settings.webp" alt="Still's capture settings with independent copy, save, editor, and clickable preview switches, and an interface scale option" width="560">
+<img src="docs/images/settings.webp" alt="Still's settings with independent copy, save, editor, and clickable preview switches, an interface scale option, and an editor window style" width="420">
 
 Choose any combination of **Copy to clipboard**, **Save to folder**, **Open editor**, and **Show clickable preview** in Settings. The initial setup copies and shows a notification preview. Your notification daemon handles its placement.
 
-Use **Interface scale** to resize Still on high-density or fractionally scaled displays. It takes effect the next time Still opens.
+Use **Interface scale** to resize Still, controls included, on high-density or fractionally scaled displays. It applies the moment you save. Set **Editor window** to **Compact** for a smaller fixed-size editor that tiling window managers float instead of tiling.
 
 Select a style in **Framing** and click **Make default** to use it for new images, automatic copy and save, and capture previews. Select **Original** and make it the default to keep captures unframed.
 

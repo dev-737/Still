@@ -2479,7 +2479,7 @@ fn settings(parent: &adw::ApplicationWindow) {
     look.add(&zoom);
     let window_style = adw::ComboRow::builder()
         .title("Editor window")
-        .subtitle("Compact is a smaller fixed-size window that tiling window managers float. Applies to the next editor you open.")
+        .subtitle("Compact is a smaller fixed-size window that floats on tiling desktops. Applies to the next editor.")
         .model(&gtk::StringList::new(
             &WindowStyle::ALL.map(WindowStyle::label),
         ))
