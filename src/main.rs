@@ -3,6 +3,7 @@ mod effects;
 mod frames;
 mod picker;
 mod render;
+mod scaling;
 mod sharex;
 mod ui;
 

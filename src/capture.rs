@@ -8,6 +8,35 @@ use std::{
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowStyle {
+    #[default]
+    Standard,
+    Compact,
+}
+
+impl WindowStyle {
+    pub const ALL: [WindowStyle; 2] = [WindowStyle::Standard, WindowStyle::Compact];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WindowStyle::Standard => "Standard",
+            WindowStyle::Compact => "Compact floating",
+        }
+    }
+
+    pub fn default_size(self) -> (i32, i32) {
+        match self {
+            WindowStyle::Standard => (1110, 730),
+            WindowStyle::Compact => (900, 620),
+        }
+    }
+
+    pub fn resizable(self) -> bool {
+        self == WindowStyle::Standard
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -18,6 +47,7 @@ pub struct Settings {
     pub folder: PathBuf,
     pub filename: String,
     pub ui_scale: f64,
+    pub window_style: WindowStyle,
 }
 
 fn home() -> PathBuf {
@@ -36,6 +66,7 @@ impl Default for Settings {
             folder: home().join("Pictures/Screenshots"),
             filename: "Still-%Y-%m-%d_%H-%M-%S".into(),
             ui_scale: 1.,
+            window_style: WindowStyle::default(),
         }
     }
 }

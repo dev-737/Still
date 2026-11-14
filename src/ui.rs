@@ -1,8 +1,9 @@
 use crate::frames::{self, DefaultFrame};
 use crate::{
-    capture::{self, Result, Settings},
+    capture::{self, Result, Settings, WindowStyle},
     picker::{self, Actions, FramePicker},
     render::{self, Color, Edit, Frame, Gradient, Mark, Mode, Point, Rect, Tool},
+    scaling,
 };
 use adw::prelude::*;
 use cairo::{Context, Format, ImageSurface};
@@ -204,49 +205,17 @@ fn weak<T>(ui: &Rc<Ui>, f: impl Fn(&Rc<Ui>, T) + 'static) -> impl Fn(T) + 'stati
         }
     }
 }
-thread_local! {
-    static SCALE: Cell<f64> = const { Cell::new(1.) };
-}
-
-fn scale() -> f64 {
-    SCALE.with(Cell::get)
-}
-
-fn scaled(v: i32) -> i32 {
-    (f64::from(v) * scale()).round() as i32
-}
-
-fn scaled_css(css: &str, factor: f64) -> String {
-    let mut out = String::with_capacity(css.len());
-    let bytes = css.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_digit()
-            && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'#')
-        {
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-                i += 1;
-            }
-            if css[i..].starts_with("px") {
-                let v: f64 = css[start..i].parse().unwrap_or(0.);
-                out.push_str(&format!("{:.2}", v * factor));
-            } else {
-                out.push_str(&css[start..i]);
-            }
-        } else {
-            let ch = css[i..].chars().next().unwrap();
-            out.push(ch);
-            i += ch.len_utf8();
-        }
-    }
-    out
-}
+const ICON_SIDE: i32 = 20;
+const RAIL_WIDTH: i32 = 61;
+const CENTER_MIN_WIDTH: i32 = 260;
+const INSPECTOR_MIN_WIDTH: i32 = 218;
 
 fn icon(kind: &str) -> gtk::DrawingArea {
     let icon = gtk::DrawingArea::new();
-    icon.set_content_width(scaled(20));
-    icon.set_content_height(scaled(20));
+    scaling::follow(&icon, |icon, factor| {
+        icon.set_content_width(scaling::scaled_by(ICON_SIDE, factor));
+        icon.set_content_height(scaling::scaled_by(ICON_SIDE, factor));
+    });
     let kind = kind.to_owned();
     icon.set_draw_func(move |widget, c, w, h| {
         let color = widget.color();
@@ -322,25 +291,9 @@ pub fn launch(bytes: Option<Vec<u8>>, path: Option<PathBuf>, preferences: bool) 
             window.present();
             return;
         }
-        let factor = Settings::load().map_or(1., |s| s.ui_scale).clamp(0.5, 2.);
-        SCALE.with(|c| c.set(factor));
-        if (factor - 1.).abs() > 1e-3 {
-            if let Some(settings) = gtk::Settings::default() {
-                let dpi = settings.gtk_xft_dpi();
-                let base = if dpi > 0 { dpi } else { 96 * 1024 };
-                settings.set_gtk_xft_dpi((f64::from(base) * factor).round() as i32);
-            }
-        }
-        let provider = gtk::CssProvider::new();
-        provider.load_from_string(&scaled_css(include_str!("style.css"), factor));
-        if let Some(display) = gdk::Display::default() {
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
-        }
-        let ui = build(app);
+        let saved = Settings::load().unwrap_or_default();
+        scaling::apply(saved.ui_scale);
+        let ui = build(app, saved.window_style);
         if let Some((bytes, path)) = initial.borrow_mut().take() {
             let loaded = if let Some(data) = bytes {
                 ImageSurface::create_from_png(&mut Cursor::new(data))
@@ -370,12 +323,14 @@ pub fn launch(bytes: Option<Vec<u8>>, path: Option<PathBuf>, preferences: bool) 
     }
 }
 
-fn build(app: &adw::Application) -> Rc<Ui> {
+fn build(app: &adw::Application, style: WindowStyle) -> Rc<Ui> {
+    let (width, height) = style.default_size();
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Still")
-        .default_width(scaled(1110))
-        .default_height(scaled(730))
+        .default_width(scaling::scaled(width))
+        .default_height(scaling::scaled(height))
+        .resizable(style.resizable())
         .build();
     let toast = adw::ToastOverlay::new();
     let view = adw::ToolbarView::new();
@@ -442,9 +397,11 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     }
     let rail_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .min_content_width(scaled(61))
         .child(&rail)
         .build();
+    scaling::follow(&rail_scroll, |scroll, factor| {
+        scroll.set_min_content_width(scaling::scaled_by(RAIL_WIDTH, factor))
+    });
     middle.append(&rail_scroll);
     let center = vbox(0);
     center.set_hexpand(true);
@@ -488,7 +445,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .build();
     body.add_named(&scroll, Some("image"));
     center.append(&body);
-    center.set_width_request(scaled(260));
+    scaling::follow(&center, |center, factor| {
+        center.set_width_request(scaling::scaled_by(CENTER_MIN_WIDTH, factor))
+    });
     let framing = vbox(12);
     margin(&framing, 13);
     framing.add_css_class("framing");
@@ -567,10 +526,12 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     framing.append(&frame_controls);
     let inspector = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .min_content_width(scaled(218))
         .propagate_natural_width(false)
         .child(&framing)
         .build();
+    scaling::follow(&inspector, |inspector, factor| {
+        inspector.set_min_content_width(scaling::scaled_by(INSPECTOR_MIN_WIDTH, factor))
+    });
     inspector.set_vexpand(true);
     let default_bar = hbox(0);
     default_bar.add_css_class("default-bar");
@@ -1400,6 +1361,7 @@ impl Ui {
         let number = gtk::SpinButton::new(Some(&scale.adjustment()), 1., 0);
         number.add_css_class("slider-number");
         number.set_width_chars(3);
+        number.set_alignment(1.);
         number.set_numeric(true);
         number.update_property(&[gtk::accessible::Property::Label(label)]);
         pass_scroll(&number);
@@ -2447,8 +2409,8 @@ fn settings(parent: &adw::ApplicationWindow) {
         .title("Still Settings")
         .transient_for(parent)
         .modal(true)
-        .default_width(scaled(545))
-        .default_height(scaled(660))
+        .default_width(scaling::scaled(545))
+        .default_height(scaling::scaled(660))
         .build();
     let page = adw::PreferencesPage::builder()
         .title("Capture")
@@ -2504,7 +2466,7 @@ fn settings(parent: &adw::ApplicationWindow) {
     let look = adw::PreferencesGroup::builder().title("Appearance").build();
     let zoom = adw::SpinRow::builder()
         .title("Interface scale")
-        .subtitle("Percent. Takes effect the next time Still opens.")
+        .subtitle("Percent. Applies as soon as you save.")
         .adjustment(&gtk::Adjustment::new(
             (current.ui_scale * 100.).round(),
             50.,
@@ -2515,6 +2477,20 @@ fn settings(parent: &adw::ApplicationWindow) {
         ))
         .build();
     look.add(&zoom);
+    let window_style = adw::ComboRow::builder()
+        .title("Editor window")
+        .subtitle("Compact is a smaller fixed-size window that tiling window managers float. Applies to the next editor you open.")
+        .model(&gtk::StringList::new(
+            &WindowStyle::ALL.map(WindowStyle::label),
+        ))
+        .selected(
+            WindowStyle::ALL
+                .iter()
+                .position(|style| *style == current.window_style)
+                .unwrap_or(0) as u32,
+        )
+        .build();
+    look.add(&window_style);
     page.add(&look);
     let apply_group = adw::PreferencesGroup::new();
     let line = adw::ActionRow::builder()
@@ -2536,9 +2512,11 @@ fn settings(parent: &adw::ApplicationWindow) {
             folder: PathBuf::from(folder.text().as_str()),
             filename: filename.text().to_string(),
             ui_scale: zoom.value() / 100.,
+            window_style: WindowStyle::ALL[window_style.selected() as usize],
         };
         match data.store() {
             Ok(()) => {
+                scaling::apply(data.ui_scale);
                 if let Some(w) = weak.upgrade() {
                     w.close();
                 }
@@ -2556,16 +2534,6 @@ mod tests {
 
     fn edit(w: i32, h: i32) -> Edit {
         Edit::new(&ImageSurface::create(Format::ARgb32, w, h).unwrap())
-    }
-
-    #[test]
-    fn css_pixel_sizes_follow_the_interface_scale() {
-        let css = scaled_css(
-            ".a { min-width: 34px; color: #4bd996; margin: 0 .5em; opacity: .15; }",
-            1.5,
-        );
-        assert!(css.contains("min-width: 51.00px"));
-        assert!(css.contains("#4bd996") && css.contains(".5em") && css.contains(".15"));
     }
 
     #[test]
