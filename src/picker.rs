@@ -9,6 +9,8 @@ const POPOVER_MIN_HEIGHT: i32 = 160;
 const POPOVER_CHROME: f32 = 150.;
 const PREVIEW_POLL: std::time::Duration = std::time::Duration::from_millis(120);
 const TITLE: &str = "Custom frames";
+const BUTTON_THUMB_WIDTH: i32 = 56;
+const BUTTON_THUMB_HEIGHT: i32 = 36;
 
 type PreviewRenderer = Box<dyn Fn(&str) -> Option<gdk::Texture>>;
 
@@ -251,8 +253,52 @@ fn setup(item: &gtk::ListItem, shared: &Rc<Shared>) {
     item.set_child(Some(&tile.root));
 }
 
+struct Summary {
+    root: gtk::Box,
+    thumbnail: gtk::Picture,
+    thumbnail_slot: gtk::ScrolledWindow,
+    name: gtk::Label,
+}
+
+impl Summary {
+    fn build() -> Self {
+        let thumbnail = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::Contain)
+            .can_shrink(true)
+            .build();
+        thumbnail.add_css_class("tile-preview");
+        let thumbnail_slot = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .width_request(BUTTON_THUMB_WIDTH)
+            .height_request(BUTTON_THUMB_HEIGHT)
+            .valign(gtk::Align::Center)
+            .child(&thumbnail)
+            .visible(false)
+            .build();
+        let name = gtk::Label::builder()
+            .label(TITLE)
+            .hexpand(true)
+            .xalign(0.)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        let arrow = gtk::Image::from_icon_name("pan-down-symbolic");
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        root.append(&thumbnail_slot);
+        root.append(&name);
+        root.append(&arrow);
+        Self {
+            root,
+            thumbnail,
+            thumbnail_slot,
+            name,
+        }
+    }
+}
+
 pub struct FramePicker {
     button: gtk::MenuButton,
+    summary: Summary,
     store: gtk::StringList,
     shared: Rc<Shared>,
 }
@@ -338,10 +384,10 @@ impl FramePicker {
         let shared = Rc::new(Shared::default());
         let store = gtk::StringList::new(&[]);
         let popover = gtk::Popover::new();
+        let summary = Summary::build();
         let button = gtk::MenuButton::builder()
-            .label(TITLE)
+            .child(&summary.root)
             .popover(&popover)
-            .always_show_arrow(true)
             .visible(false)
             .build();
         button.add_css_class("frame-preset");
@@ -366,6 +412,7 @@ impl FramePicker {
         });
         Self {
             button,
+            summary,
             store,
             shared,
         }
@@ -407,14 +454,41 @@ impl FramePicker {
             .filter(|id| self.shared.names.borrow().contains_key(*id));
         match known {
             Some(id) => {
-                self.button.set_label(&self.shared.name_of(id));
-                self.button.add_css_class("selected-frame");
+                self.summary.name.set_text(&self.shared.name_of(id));
+                self.summary.thumbnail_slot.set_visible(true);
+                self.show_thumbnail(id);
             }
             None => {
-                self.button
-                    .set_label(&format!("{TITLE} · {}", self.store.n_items()));
-                self.button.remove_css_class("selected-frame");
+                self.summary
+                    .name
+                    .set_text(&format!("{TITLE} · {}", self.store.n_items()));
+                self.summary.thumbnail_slot.set_visible(false);
             }
         }
+    }
+
+    fn show_thumbnail(&self, id: &str) {
+        let cached = self.shared.previews.borrow().get(id).cloned();
+        if cached.is_some() {
+            self.summary.thumbnail.set_paintable(cached.as_ref());
+            return;
+        }
+        self.summary.thumbnail.set_paintable(None::<&gdk::Texture>);
+        let shared = self.shared.clone();
+        let thumbnail = self.summary.thumbnail.clone();
+        let id = id.to_owned();
+        glib::idle_add_local_full(glib::Priority::LOW, move || {
+            if shared.selected.borrow().as_deref() != Some(id.as_str()) {
+                return glib::ControlFlow::Break;
+            }
+            if let Some(rendered) = shared.render_preview(&id) {
+                shared
+                    .previews
+                    .borrow_mut()
+                    .insert(id.clone(), rendered.clone());
+                thumbnail.set_paintable(Some(&rendered));
+            }
+            glib::ControlFlow::Break
+        });
     }
 }
