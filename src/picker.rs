@@ -5,6 +5,9 @@ const TILE_WIDTH: i32 = 168;
 const TILE_HEIGHT: i32 = 104;
 const POPOVER_WIDTH: i32 = 392;
 const POPOVER_HEIGHT: i32 = 420;
+const POPOVER_MIN_HEIGHT: i32 = 160;
+const POPOVER_CHROME: f32 = 150.;
+const PREVIEW_POLL: std::time::Duration = std::time::Duration::from_millis(120);
 const TITLE: &str = "Custom frames";
 
 type PreviewRenderer = Box<dyn Fn(&str) -> Option<gdk::Texture>>;
@@ -145,15 +148,52 @@ pub fn texture(mut surface: cairo::ImageSurface) -> Option<gdk::Texture> {
     Some(texture.upcast())
 }
 
-fn show_preview_when_idle(item: &gtk::ListItem, shared: &Rc<Shared>, id: String) {
+enum Viewing {
+    Closed,
+    ScrolledAway,
+    Visible,
+}
+
+fn viewing(tile: &gtk::Widget) -> Viewing {
+    let popover_open = tile
+        .ancestor(gtk::Popover::static_type())
+        .is_some_and(|popover| popover.is_visible());
+    if !popover_open {
+        return Viewing::Closed;
+    }
+    if tile.height() == 0 {
+        return Viewing::ScrolledAway;
+    }
+    let Some(scroller) = tile.ancestor(gtk::ScrolledWindow::static_type()) else {
+        return Viewing::Visible;
+    };
+    match tile.compute_bounds(&scroller) {
+        Some(bounds)
+            if bounds.y() < scroller.height() as f32 && bounds.y() + bounds.height() > 0. =>
+        {
+            Viewing::Visible
+        }
+        _ => Viewing::ScrolledAway,
+    }
+}
+
+fn show_preview_when_visible(item: &gtk::ListItem, shared: &Rc<Shared>, id: String) {
     let item = item.downgrade();
     let shared = shared.clone();
-    glib::idle_add_local_full(glib::Priority::LOW, move || {
+    glib::timeout_add_local_full(PREVIEW_POLL, glib::Priority::LOW, move || {
         let Some(item) = item.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let Some(tile) = Tile::of(&item) else {
             return glib::ControlFlow::Break;
         };
         if id_of_item(&item).as_deref() != Some(id.as_str()) {
             return glib::ControlFlow::Break;
+        }
+        match viewing(tile.root.upcast_ref()) {
+            Viewing::Closed => return glib::ControlFlow::Break,
+            Viewing::ScrolledAway => return glib::ControlFlow::Continue,
+            Viewing::Visible => {}
         }
         let cached = shared.previews.borrow().get(&id).cloned();
         let preview = cached.or_else(|| {
@@ -164,7 +204,7 @@ fn show_preview_when_idle(item: &gtk::ListItem, shared: &Rc<Shared>, id: String)
                 .insert(id.clone(), rendered.clone());
             Some(rendered)
         });
-        if let (Some(preview), Some(tile)) = (preview, Tile::of(&item)) {
+        if let Some(preview) = preview {
             tile.picture.set_paintable(Some(&preview));
         }
         glib::ControlFlow::Break
@@ -193,7 +233,7 @@ fn bind(item: &gtk::ListItem, shared: &Rc<Shared>) {
         Some(preview) => tile.picture.set_paintable(Some(&preview)),
         None => {
             tile.picture.set_paintable(None::<&gdk::Texture>);
-            show_preview_when_idle(item, shared, id);
+            show_preview_when_visible(item, shared, id);
         }
     }
 }
@@ -217,52 +257,87 @@ pub struct FramePicker {
     shared: Rc<Shared>,
 }
 
+struct Content {
+    search: gtk::SearchEntry,
+    scroller: gtk::ScrolledWindow,
+}
+
+fn available_height(anchor: &gtk::Widget) -> i32 {
+    let room = anchor
+        .root()
+        .and_then(|root| {
+            let bounds = anchor.compute_bounds(&root)?;
+            let below = root.height() as f32 - (bounds.y() + bounds.height());
+            Some(below.max(bounds.y()))
+        })
+        .unwrap_or(POPOVER_HEIGHT as f32 + POPOVER_CHROME);
+    ((room - POPOVER_CHROME) as i32).clamp(POPOVER_MIN_HEIGHT, POPOVER_HEIGHT)
+}
+
+fn build_content(shared: &Rc<Shared>, store: &gtk::StringList, popover: &gtk::Popover) -> Content {
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Search custom frames")
+        .build();
+    let filter = gtk::CustomFilter::new({
+        let shared = shared.clone();
+        let search = search.clone();
+        move |object| {
+            let query = search.text().to_lowercase();
+            id_of_object(object)
+                .is_some_and(|id| shared.name_of(&id).to_lowercase().contains(&query))
+        }
+    });
+    search.connect_search_changed({
+        let filter = filter.clone();
+        move |_| filter.changed(gtk::FilterChange::Different)
+    });
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup({
+        let shared = shared.clone();
+        move |_, object| setup(list_item(object), &shared)
+    });
+    factory.connect_bind({
+        let shared = shared.clone();
+        move |_, object| bind(list_item(object), &shared)
+    });
+    let visible = gtk::FilterListModel::new(Some(store.clone()), Some(filter));
+    let grid = gtk::GridView::new(Some(gtk::NoSelection::new(Some(visible))), Some(factory));
+    grid.set_min_columns(2);
+    grid.set_max_columns(3);
+    grid.set_single_click_activate(true);
+    grid.add_css_class("frame-grid");
+    grid.connect_activate({
+        let shared = shared.clone();
+        let popover = popover.clone();
+        move |grid, position| {
+            let id = grid
+                .model()
+                .and_then(|model| model.item(position))
+                .and_then(|object| id_of_object(&object));
+            popover.popdown();
+            if let (Some(id), Some(actions)) = (id, shared.actions()) {
+                (actions.choose)(&id);
+            }
+        }
+    });
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_width(POPOVER_WIDTH)
+        .min_content_height(POPOVER_HEIGHT)
+        .child(&grid)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    content.append(&search);
+    content.append(&scroller);
+    popover.set_child(Some(&content));
+    Content { search, scroller }
+}
+
 impl FramePicker {
     pub fn new() -> Self {
         let shared = Rc::new(Shared::default());
         let store = gtk::StringList::new(&[]);
-        let search = gtk::SearchEntry::builder()
-            .placeholder_text("Search custom frames")
-            .build();
-        let filter = gtk::CustomFilter::new({
-            let shared = shared.clone();
-            let search = search.clone();
-            move |object| {
-                let query = search.text().to_lowercase();
-                id_of_object(object)
-                    .is_some_and(|id| shared.name_of(&id).to_lowercase().contains(&query))
-            }
-        });
-        search.connect_search_changed({
-            let filter = filter.clone();
-            move |_| filter.changed(gtk::FilterChange::Different)
-        });
-        let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup({
-            let shared = shared.clone();
-            move |_, object| setup(list_item(object), &shared)
-        });
-        factory.connect_bind({
-            let shared = shared.clone();
-            move |_, object| bind(list_item(object), &shared)
-        });
-        let visible = gtk::FilterListModel::new(Some(store.clone()), Some(filter));
-        let grid = gtk::GridView::new(Some(gtk::NoSelection::new(Some(visible))), Some(factory));
-        grid.set_min_columns(2);
-        grid.set_max_columns(3);
-        grid.set_single_click_activate(true);
-        grid.add_css_class("frame-grid");
-        let scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .min_content_width(POPOVER_WIDTH)
-            .min_content_height(POPOVER_HEIGHT)
-            .child(&grid)
-            .build();
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        content.append(&search);
-        content.append(&scroller);
         let popover = gtk::Popover::new();
-        popover.set_child(Some(&content));
         let button = gtk::MenuButton::builder()
             .label(TITLE)
             .popover(&popover)
@@ -271,27 +346,21 @@ impl FramePicker {
             .build();
         button.add_css_class("frame-preset");
         button.add_css_class("custom-frames-button");
-        grid.connect_activate({
-            let shared = shared.clone();
-            let popover = popover.clone();
-            move |grid, position| {
-                let id = grid
-                    .model()
-                    .and_then(|model| model.item(position))
-                    .and_then(|object| id_of_object(&object));
-                popover.popdown();
-                if let (Some(id), Some(actions)) = (id, shared.actions()) {
-                    (actions.choose)(&id);
-                }
-            }
-        });
+        let content = RefCell::new(None::<Content>);
         popover.connect_show({
             let shared = shared.clone();
             let store = store.clone();
-            move |_| {
+            move |popover| {
+                let mut built = content.borrow_mut();
+                let content = built.get_or_insert_with(|| build_content(&shared, &store, popover));
+                if let Some(anchor) = popover.parent() {
+                    content
+                        .scroller
+                        .set_min_content_height(available_height(&anchor));
+                }
                 shared.previews.borrow_mut().clear();
-                search.set_text("");
-                search.grab_focus();
+                content.search.set_text("");
+                content.search.grab_focus();
                 store.items_changed(0, store.n_items(), store.n_items());
             }
         });
