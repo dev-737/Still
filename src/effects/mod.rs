@@ -28,6 +28,7 @@ mod value;
 
 pub use draw::rounded_rect;
 pub use registry::{BuildError, build};
+pub use typography::install_bundled_fonts;
 
 use crate::capture::Result;
 use cairo::{Context, Format, ImageSurface};

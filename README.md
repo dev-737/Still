@@ -94,3 +94,9 @@ bind=SUPER+SHIFT,s,spawn,/home/YOUR_USER/.local/bin/still --capture
 | C, P, L, A, U, O, T, B, R | Crop, freehand, line, arrow, rectangle, ellipse, text, blur, redact when the canvas has focus |
 
 Still stores settings and imported presets under `${XDG_CONFIG_HOME:-$HOME/.config}/still`.
+
+## License
+
+Still is released under GPL-3.0-or-later. See `LICENSE`.
+
+Presets that ask for the Windows handwriting font Ink Free (such as Polaroid) use the bundled Caveat font when Ink Free is not installed. Caveat is licensed under the SIL Open Font License 1.1, included as `assets/fonts/Caveat-OFL.txt`.

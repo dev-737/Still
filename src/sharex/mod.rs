@@ -159,6 +159,7 @@ mod tests {
     #[test]
     #[ignore]
     fn gallery_renders() {
+        crate::effects::install_bundled_fonts();
         let dir = std::env::var("STILL_GALLERY").expect("set STILL_GALLERY");
         let out = std::env::var("STILL_GALLERY_OUT").expect("set STILL_GALLERY_OUT");
         let sample = include_bytes!("../../assets/frame-sample.png");

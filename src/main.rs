@@ -8,6 +8,7 @@ mod sharex;
 mod ui;
 
 fn run() -> capture::Result<()> {
+    effects::install_bundled_fonts();
     let mut args = std::env::args_os().skip(1);
     let mut bytes = None;
     let mut preferences = false;
