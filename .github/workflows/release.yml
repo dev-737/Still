@@ -50,8 +50,39 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  appimage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Check release version
+        id: version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          manifest_version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          test "$version" = "$manifest_version"
+          echo "number=$version" >> "$GITHUB_OUTPUT"
+      - name: Install appimagetool
+        run: |
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool" | sha256sum -c -
+          sudo install -m755 appimagetool /usr/local/bin/appimagetool
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: bash packaging/appimage/build.sh "${{ steps.version.outputs.number }}" dist
+      - name: Inspect AppImage
+        run: |
+          ls -l dist
+          test "$(ls dist/*.AppImage | wc -l)" = 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: linux-appimage
+          path: dist/*.AppImage
+          if-no-files-found: error
+
   publish:
-    needs: packages
+    needs: [packages, appimage]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -70,8 +101,10 @@ jobs:
           tarballs=(*.tar.gz)
           debs=(*.deb)
           rpms=(*.rpm)
+          appimages=(*.AppImage)
           test "${#tarballs[@]}" = 2
           test "${#debs[@]}" = 2
           test "${#rpms[@]}" = 2
-          sha256sum "${tarballs[@]}" "${debs[@]}" "${rpms[@]}" > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Still $GITHUB_REF_NAME" --generate-notes "${tarballs[@]}" "${debs[@]}" "${rpms[@]}" SHA256SUMS
+          test "${#appimages[@]}" = 1
+          sha256sum "${tarballs[@]}" "${debs[@]}" "${rpms[@]}" "${appimages[@]}" > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Still $GITHUB_REF_NAME" --generate-notes "${tarballs[@]}" "${debs[@]}" "${rpms[@]}" "${appimages[@]}" SHA256SUMS
